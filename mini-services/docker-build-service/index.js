@@ -53,7 +53,7 @@ function emitLog(socket, stream, text) {
 // Recognized failure signatures → actionable hints shown after a failed build.
 const FAILURE_HINTS = [
   {
-    re: /gyp ERR!|Could not find any Python|node-gyp/i,
+    re: /gyp ERR!|Could not find any Python/i,
     hint:
       "Native Node modules need build tools. Re-run Analyze/Generate with the latest DockGen (it adds python3/make/g++ automatically when native modules are detected), or add to the Dockerfile install stage: RUN apk add --no-cache python3 make g++",
   },
@@ -67,9 +67,14 @@ const FAILURE_HINTS = [
     hint: "The Docker host is out of disk space — run: docker system prune -af",
   },
   {
-    re: /ERR_PNPM_OUTDATED_LOCKFILE|frozen-lockfile/i,
+    re: /ERR_PNPM_OUTDATED_LOCKFILE|Your lockfile needs to be updated|can only install packages when your package\.json and package-lock\.json are in sync/i,
     hint:
       "The lockfile is out of sync with package.json — update the lockfile in the repo, or remove --frozen-lockfile from the install command.",
+  },
+  {
+    re: /(post|pre)?install.*Cannot find module|prepare.*Cannot find module/i,
+    hint:
+      "An install lifecycle script needs repo files that weren't copied before install — re-run Analyze/Generate with the latest DockGen (it copies the full source before install when lifecycle scripts are detected).",
   },
   {
     re: /permission denied while trying to connect to the Docker daemon/i,

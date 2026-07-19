@@ -138,6 +138,8 @@ export interface AnalysisResult {
   binaryName?: string;
   /** Node base image tag derived from package.json engines.node, e.g. "24-alpine". */
   nodeVersion?: string;
+  /** Root package.json declares preinstall/install/postinstall/prepare scripts. */
+  hasNodeLifecycleScripts?: boolean;
 }
 
 export interface Customizations {

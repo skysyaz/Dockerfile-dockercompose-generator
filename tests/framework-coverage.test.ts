@@ -211,6 +211,51 @@ describe("native node modules and engine versions", () => {
     );
   });
 
+  it("copies full source before install when lifecycle scripts exist (open-design case)", async () => {
+    await withFixture(
+      {
+        "package.json": JSON.stringify({
+          name: "open-design",
+          scripts: { postinstall: "node ./scripts/postinstall.mjs" },
+          dependencies: { express: "^4.18.0" },
+        }),
+        "package-lock.json": "{}",
+        "scripts/postinstall.mjs": "console.log('ok');\n",
+      },
+      async (dir) => {
+        const analysis = await analyzeDirectory("https://github.com/o/open-design", dir);
+        assert.equal(analysis.hasNodeLifecycleScripts, true);
+        const dockerfile = generateDockerfile(analysis, {});
+        // Full source is copied before the install step so postinstall can run.
+        const copyAll = dockerfile.indexOf("COPY . .");
+        const install = dockerfile.indexOf("RUN npm ci");
+        assert.ok(copyAll !== -1 && install !== -1 && copyAll < install);
+        assert.doesNotMatch(dockerfile, /COPY package\*\.json package-lock\.json \.\//);
+      },
+    );
+  });
+
+  it("keeps the cached manifest-only COPY when there are no lifecycle scripts", async () => {
+    await withFixture(
+      {
+        "package.json": JSON.stringify({
+          name: "api",
+          scripts: { start: "node index.js", build: "tsc" },
+          dependencies: { express: "^4.18.0" },
+        }),
+        "package-lock.json": "{}",
+      },
+      async (dir) => {
+        const analysis = await analyzeDirectory("https://github.com/o/api", dir);
+        assert.equal(analysis.hasNodeLifecycleScripts, false);
+        assert.match(
+          generateDockerfile(analysis, {}),
+          /COPY package\*\.json package-lock\.json \.\//,
+        );
+      },
+    );
+  });
+
   it("skips build tools for pure-JS projects", async () => {
     await withFixture(
       {

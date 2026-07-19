@@ -1353,6 +1353,7 @@ export async function analyzeDirectory(
   const rootFiles = await listRootFiles(workDir);
   let packageManagerField = "";
   let nodeVersion = "";
+  let hasNodeLifecycleScripts = false;
   if (rootFiles.includes("package.json")) {
     try {
       const pkg = JSON.parse(await readText(path.join(workDir, "package.json")));
@@ -1363,6 +1364,15 @@ export async function analyzeDirectory(
         nodeVersion = `${major}-alpine`;
         detection.notes.push(
           `Using node:${major}-alpine base image (package.json engines.node: "${engines}").`,
+        );
+      }
+      const scripts = (pkg.scripts ?? {}) as Record<string, string>;
+      hasNodeLifecycleScripts = ["preinstall", "install", "postinstall", "prepare"].some(
+        (name) => typeof scripts[name] === "string" && scripts[name].length > 0,
+      );
+      if (hasNodeLifecycleScripts) {
+        detection.notes.push(
+          "package.json has install lifecycle scripts — copying full source before install so they can run.",
         );
       }
     } catch {
@@ -1468,6 +1478,7 @@ export async function analyzeDirectory(
     goBuildPath,
     binaryName,
     nodeVersion,
+    hasNodeLifecycleScripts,
   };
 }
 
@@ -1600,13 +1611,16 @@ export function generateDockerfile(
   const gyp = NODE_FRAMEWORKS.has(analysis.framework)
     ? nodeGypLine(analysis, images.node)
     : "";
+  // Lifecycle scripts (postinstall etc.) reference repo files, so the
+  // manifest-only COPY would make the install fail — copy everything instead.
+  const depsCopy = analysis.hasNodeLifecycleScripts ? "COPY . ." : copyDeps;
 
   switch (analysis.framework) {
     case "nextjs":
       return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 
 # Stage 2: Build
@@ -1789,7 +1803,7 @@ ENTRYPOINT ["dotnet", "${dllName}.dll"]
     case "hono":
       return `FROM ${images.node} AS deps
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 
 FROM ${images.node} AS runner
@@ -1809,7 +1823,7 @@ CMD ["npm", "start"]
       return `# Stage 1: Build static assets
 FROM ${images.node} AS builder
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 COPY . .
 ${build}
@@ -1829,7 +1843,7 @@ CMD ["nginx", "-g", "daemon off;"]
         return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 
 # Stage 2: Build
@@ -1855,7 +1869,7 @@ CMD ["node", "./dist/server/entry.mjs"]
       return `# Stage 1: Build static assets
 FROM ${images.node} AS builder
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 COPY . .
 ${build}
@@ -1872,7 +1886,7 @@ CMD ["nginx", "-g", "daemon off;"]
     case "remix":
       return `FROM ${images.node} AS builder
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 COPY . .
 ${build}
@@ -2003,7 +2017,7 @@ CMD ["nginx", "-g", "daemon off;"]
       return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 
 # Stage 2: Build
@@ -2028,7 +2042,7 @@ CMD ["node", ".output/server/index.mjs"]
     case "svelte":
       return `FROM ${images.node} AS builder
 WORKDIR /app
-${gyp}${copyDeps}
+${gyp}${depsCopy}
 ${install}
 COPY . .
 ${build}
