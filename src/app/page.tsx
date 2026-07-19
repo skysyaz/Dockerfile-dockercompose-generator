@@ -1,6 +1,5 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import { useCallback, useEffect, useRef, useState } from "react";
 import JSZip from "jszip";
 import { io as ioClient } from "socket.io-client";
@@ -54,12 +53,8 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { CodeBlock } from "@/components/code-block";
 import type { AnalysisResult, BuildLogLine, GeneratedFiles } from "@/lib/types";
-
-const SyntaxHighlighter = dynamic(
-  () => import("react-syntax-highlighter").then((mod) => mod.Prism),
-  { ssr: false },
-);
 
 const SAMPLE_REPOS = [
   { label: "Next.js", url: "https://github.com/vercel/commerce" },
@@ -105,7 +100,7 @@ export default function HomePage() {
   const [files, setFiles] = useState<GeneratedFiles | null>(null);
   const [tokenProvided, setTokenProvided] = useState(false);
   const [enabledServices, setEnabledServices] = useState<string[]>([]);
-  const [customOpen, setCustomOpen] = useState(false);
+  const [customOpen, setCustomOpen] = useState(true);
   const [portOverride, setPortOverride] = useState("");
   const [baseImageVersion, setBaseImageVersion] = useState("");
   const [extraEnv, setExtraEnv] = useState<{ key: string; value: string }[]>([]);
@@ -172,6 +167,9 @@ export default function HomePage() {
       if (!res.ok) throw new Error(data.detail || "Generation failed");
       setFiles(data.files);
       setAnalysis(data.analysis);
+      if (data.analysis?.port && overrides?.port) {
+        setPortOverride(String(overrides.port));
+      }
       setEnabledServices(
         overrides?.enabledServices ??
           data.analysis.services.map((s: { name: string }) => s.name),
@@ -541,18 +539,43 @@ export default function HomePage() {
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
+                {analysis.existingFiles?.length > 0 && (
+                  <Badge className="bg-amber-500/10 text-amber-300 border-amber-500/30">
+                    Existing Docker files audited: {analysis.existingFiles.join(", ")}
+                  </Badge>
+                )}
+
                 <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                   {[
                     ["Language", analysis.language],
                     ["Framework", analysis.framework],
                     ["Package Mgr", analysis.packageManager],
-                    ["Port", String(analysis.port)],
                   ].map(([label, value]) => (
                     <div key={label} className="rounded-lg border p-3">
                       <div className="text-xs text-muted-foreground">{label}</div>
-                      <div className="font-mono text-sm mt-1">{value}</div>
+                      <div className="font-mono text-sm mt-1 text-foreground">{value}</div>
                     </div>
                   ))}
+                  <div className="rounded-lg border p-3 space-y-1">
+                    <Label className="text-xs text-muted-foreground">Port</Label>
+                    <div className="flex gap-2">
+                      <Input
+                        type="number"
+                        className="h-8 font-mono text-sm text-foreground"
+                        value={portOverride || String(analysis.port)}
+                        onChange={(e) => setPortOverride(e.target.value)}
+                      />
+                      <Button
+                        type="button"
+                        size="sm"
+                        className="h-8 bg-emerald-500 hover:bg-emerald-600 text-emerald-950 shrink-0"
+                        disabled={regenerating}
+                        onClick={handleRegenerate}
+                      >
+                        Apply
+                      </Button>
+                    </div>
+                  </div>
                 </div>
 
                 {analysis.services.length > 0 && (
@@ -786,25 +809,10 @@ export default function HomePage() {
                             </Button>
                           </div>
                         </div>
-                        <div
-                          className="rounded-lg border overflow-auto max-h-[600px]"
-                          style={{ background: "oklch(0.18 0 0)" }}
-                        >
-                          <SyntaxHighlighter
-                            language={getSyntaxLanguage(file)}
-                            useInlineStyles
-                            showLineNumbers
-                            customStyle={{
-                              margin: 0,
-                              padding: "1rem",
-                              background: "oklch(0.18 0 0)",
-                              fontSize: "12.5px",
-                            }}
-                            codeTagProps={{ style: { fontFamily: "var(--font-geist-mono)" } }}
-                          >
-                            {content}
-                          </SyntaxHighlighter>
-                        </div>
+                        <CodeBlock
+                          content={content}
+                          language={getSyntaxLanguage(file)}
+                        />
                       </TabsContent>
                     );
                   })}
@@ -847,8 +855,8 @@ export default function HomePage() {
             {[
               {
                 icon: Boxes,
-                title: "15+ frameworks",
-                text: "Next.js, Express, NestJS, Django, Flask, FastAPI, Spring Boot, Rails, Laravel, Symfony, Go, Rust, .NET, Vue, Angular, Vite.",
+                title: "20+ languages & frameworks",
+                text: "Next.js, Nuxt, Svelte, Express, NestJS, Django, Flask, FastAPI, Spring Boot, Rails, Laravel, Phoenix, Elixir, Scala, Kotlin, Go, Rust, .NET, Deno, Swift, Haskell, and more.",
               },
               {
                 icon: Server,

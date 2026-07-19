@@ -4,6 +4,7 @@ import { pipeline } from "stream/promises";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as tar from "tar";
+import { auditExistingFiles, type ExistingDockerFiles } from "./docker-audit";
 import type {
   AnalysisResult,
   Customizations,
@@ -44,6 +45,13 @@ const BACKEND_MARKERS = [
   "Gemfile",
   "composer.json",
   "artisan",
+  "mix.exs",
+  "build.sbt",
+  "Package.swift",
+  "stack.yaml",
+  "deno.json",
+  "deno.jsonc",
+  "CMakeLists.txt",
 ];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -180,6 +188,67 @@ async function readText(filePath: string): Promise<string> {
   } catch {
     return "";
   }
+}
+
+async function readExistingDockerFiles(workDir: string): Promise<ExistingDockerFiles> {
+  const candidates = [
+    "Dockerfile",
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    ".dockerignore",
+    ".env.example",
+    ".env",
+  ] as const;
+  const found: ExistingDockerFiles = {};
+  for (const name of candidates) {
+    const content = await readText(path.join(workDir, name));
+    if (content) {
+      found[name] = content;
+    }
+  }
+  return found;
+}
+
+function workDirFromClone(cloneDir: string, backendSubdir: string): string {
+  return backendSubdir ? path.join(cloneDir, backendSubdir) : cloneDir;
+}
+
+export function getCachedCloneDir(
+  repoUrl: string,
+  githubToken?: string,
+): string | null {
+  const entry = cloneCache.get(cacheKey(repoUrl, githubToken));
+  if (!entry || entry.expiresAt <= Date.now()) return null;
+  return entry.dir;
+}
+
+export async function buildGeneratedFiles(
+  analysis: AnalysisResult,
+  customizations: Customizations = {},
+  cloneDir?: string,
+): Promise<{ files: GeneratedFiles; auditFixes: string[] }> {
+  const generated = generateAllFiles(analysis, customizations);
+  if (!cloneDir) return { files: generated, auditFixes: [] };
+
+  const workDir = workDirFromClone(cloneDir, analysis.backendSubdir);
+  const existing = await readExistingDockerFiles(workDir);
+  const existingNames = Object.keys(existing);
+  if (!existingNames.length) return { files: generated, auditFixes: [] };
+
+  const audited = auditExistingFiles(
+    existing,
+    { ...generated } as Record<string, string>,
+    analysis,
+    customizations,
+  );
+
+  return {
+    files: audited.files as unknown as GeneratedFiles,
+    auditFixes: [
+      `Found existing Docker config: ${existingNames.join(", ")}`,
+      ...audited.fixes,
+    ],
+  };
 }
 
 async function findBackendSubdir(root: string, depth = 0): Promise<string> {
@@ -449,6 +518,97 @@ async function detectFramework(
     };
   }
 
+  if (has("mix.exs")) {
+    const mix = await read("mix.exs");
+    if (/phoenix/i.test(mix)) {
+      return {
+        framework: "phoenix",
+        language: "elixir",
+        port: 4000,
+        entrypoint: "mix phx.server",
+        buildTool: "mix",
+        notes,
+      };
+    }
+    return {
+      framework: "elixir",
+      language: "elixir",
+      port: 4000,
+      entrypoint: "mix run",
+      buildTool: "mix",
+      notes,
+    };
+  }
+
+  if (has("build.sbt")) {
+    return {
+      framework: "scala",
+      language: "scala",
+      port: 8080,
+      entrypoint: "sbt run",
+      buildTool: "sbt",
+      notes,
+    };
+  }
+
+  if (has("deno.json") || has("deno.jsonc")) {
+    return {
+      framework: "deno",
+      language: "typescript",
+      port: 8000,
+      entrypoint: "main.ts",
+      buildTool: "deno",
+      notes,
+    };
+  }
+
+  if (has("Package.swift")) {
+    return {
+      framework: "swift",
+      language: "swift",
+      port: 8080,
+      entrypoint: "Package.swift",
+      buildTool: "swiftpm",
+      notes,
+    };
+  }
+
+  if (has("stack.yaml") || files.some((f) => f.endsWith(".cabal"))) {
+    return {
+      framework: "haskell",
+      language: "haskell",
+      port: 8080,
+      entrypoint: "main",
+      buildTool: "stack",
+      notes,
+    };
+  }
+
+  if (has("CMakeLists.txt")) {
+    return {
+      framework: "unknown",
+      language: "cpp",
+      port: 8080,
+      entrypoint: "main",
+      buildTool: "cmake",
+      notes: ["C/C++ project detected via CMakeLists.txt"],
+    };
+  }
+
+  if (has("build.gradle.kts")) {
+    const gradle = await read("build.gradle.kts");
+    if (/kotlin/i.test(gradle)) {
+      return {
+        framework: "kotlin",
+        language: "kotlin",
+        port: 8080,
+        entrypoint: "build.gradle.kts",
+        buildTool: "gradle",
+        notes,
+      };
+    }
+  }
+
   if (has("config.ru")) {
     const gem = await read("Gemfile");
     if (/rails/i.test(gem)) {
@@ -639,6 +799,26 @@ async function detectFramework(
         notes,
       };
     }
+    if (allDeps.nuxt || files.includes("nuxt.config.ts") || files.includes("nuxt.config.js")) {
+      return {
+        framework: "nuxt",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: 3000,
+        entrypoint: ".output/server/index.mjs",
+        buildTool: detectPackageManager(workDir, files),
+        notes,
+      };
+    }
+    if (allDeps["@sveltejs/kit"] || allDeps.svelte) {
+      return {
+        framework: "svelte",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: 3000,
+        entrypoint: "build",
+        buildTool: detectPackageManager(workDir, files),
+        notes,
+      };
+    }
     if (allDeps["@nestjs/core"]) {
       return {
         framework: "nestjs",
@@ -736,9 +916,17 @@ export async function analyzeDirectory(
   const packageManager = detectPackageManager(workDir, rootFiles);
   const dependencies = await readDependencies(workDir, detection.framework);
   const services = detectServices(dependencies);
+  const existing = await readExistingDockerFiles(workDir);
+  const existingFiles = Object.keys(existing);
 
   if (backendSubdir) {
     detection.notes.push(`Monorepo detected — using subdirectory: ${backendSubdir}`);
+  }
+
+  if (existingFiles.length) {
+    detection.notes.push(
+      `Existing Docker files found: ${existingFiles.join(", ")} — will audit and fix on generate.`,
+    );
   }
 
   return {
@@ -754,6 +942,7 @@ export async function analyzeDirectory(
     dependencies,
     notes: detection.notes,
     backendSubdir,
+    existingFiles,
   };
 }
 

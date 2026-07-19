@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
+  buildGeneratedFiles,
   cloneAndAnalyze,
-  generateAllFiles,
-  generateFromCache,
+  getCachedAnalysis,
+  getCachedCloneDir,
   parseGithubUrl,
   redactSecrets,
 } from "@/lib/analyzer";
@@ -35,19 +36,33 @@ export async function POST(request: NextRequest) {
       enabledServices: body.enabledServices,
     };
 
-    let analysis = generateFromCache(repoUrl, token, customizations)?.analysis;
-    let files = generateFromCache(repoUrl, token, customizations)?.files;
+    let analysis = getCachedAnalysis(repoUrl, token);
+    let cloneDir = getCachedCloneDir(repoUrl, token);
 
     if (!analysis) {
       const result = await cloneAndAnalyze(repoUrl, token);
       analysis = result.analysis;
+      cloneDir = result.dir;
     }
-    files = generateAllFiles(analysis, customizations);
 
-    return NextResponse.json({
+    const { files, auditFixes } = await buildGeneratedFiles(
       analysis,
       customizations,
+      cloneDir ?? undefined,
+    );
+
+    const enrichedAnalysis = {
+      ...analysis,
+      port: customizations.port ?? analysis.port,
+      auditFixes,
+      notes: [...analysis.notes, ...auditFixes.filter((f) => !analysis.notes.includes(f))],
+    };
+
+    return NextResponse.json({
+      analysis: enrichedAnalysis,
+      customizations,
       files,
+      auditFixes,
     });
   } catch (error) {
     const message = redactSecrets(

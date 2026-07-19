@@ -8,10 +8,18 @@ export type Language =
   | "ruby"
   | "php"
   | "csharp"
+  | "kotlin"
+  | "scala"
+  | "elixir"
+  | "swift"
+  | "haskell"
+  | "cpp"
   | "unknown";
 
 export type Framework =
   | "nextjs"
+  | "nuxt"
+  | "svelte"
   | "express"
   | "nestjs"
   | "django"
@@ -21,6 +29,7 @@ export type Framework =
   | "spring-boot"
   | "java-maven"
   | "java-gradle"
+  | "kotlin"
   | "go"
   | "rust"
   | "rails"
@@ -35,6 +44,12 @@ export type Framework =
   | "vue"
   | "angular"
   | "vite"
+  | "phoenix"
+  | "elixir"
+  | "scala"
+  | "swift"
+  | "haskell"
+  | "deno"
   | "unknown";
 
 export interface DetectedService {
@@ -58,6 +73,8 @@ export interface AnalysisResult {
   dependencies: string[];
   notes: string[];
   backendSubdir: string;
+  existingFiles: string[];
+  auditFixes?: string[];
 }
 
 export interface Customizations {
