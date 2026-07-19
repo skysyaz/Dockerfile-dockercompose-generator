@@ -76,6 +76,8 @@ export interface AnalysisResult {
   dependencies: string[];
   notes: string[];
   backendSubdir: string;
+  dotnetProject: string;
+  dotnetSolution: string;
   existingFiles: string[];
   auditFixes?: string[];
 }
