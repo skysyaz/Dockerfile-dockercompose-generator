@@ -106,6 +106,7 @@ export default function HomePage() {
   const [extraEnv, setExtraEnv] = useState<{ key: string; value: string }[]>([]);
   const [regenerating, setRegenerating] = useState(false);
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
+  const [copiedBuildLogs, setCopiedBuildLogs] = useState(false);
   const [buildOpen, setBuildOpen] = useState(false);
   const [buildLogs, setBuildLogs] = useState<BuildLogLine[]>([]);
   const [buildRunning, setBuildRunning] = useState(false);
@@ -295,6 +296,18 @@ export default function HomePage() {
     await navigator.clipboard.writeText(content);
     setCopiedFile(name);
     setTimeout(() => setCopiedFile(null), 1500);
+  };
+
+  const formatBuildLogs = (logs: BuildLogLine[]) =>
+    logs
+      .map((line) => `${new Date(line.t).toLocaleTimeString()}${line.text}`)
+      .join("\n");
+
+  const copyBuildLogs = async () => {
+    if (!buildLogs.length) return;
+    await navigator.clipboard.writeText(formatBuildLogs(buildLogs));
+    setCopiedBuildLogs(true);
+    setTimeout(() => setCopiedBuildLogs(false), 1500);
   };
 
   const startBuild = async () => {
@@ -960,7 +973,7 @@ export default function HomePage() {
               <code className="font-mono">docker compose up --build</code> on the server.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-2">
             {buildRunning ? (
               <Badge className="bg-amber-500/10 text-amber-400 border-amber-500/30">
                 <Loader2 className="size-3 mr-1 animate-spin" />
@@ -976,7 +989,27 @@ export default function HomePage() {
                 Build failed{buildDone.reason ? ` · ${buildDone.reason}` : ""}
               </Badge>
             ) : null}
-            <span className="text-xs text-muted-foreground">{buildLogs.length} log lines</span>
+            <div className="flex items-center gap-2 ml-auto">
+              <span className="text-xs text-muted-foreground">{buildLogs.length} log lines</span>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={copyBuildLogs}
+                disabled={buildLogs.length === 0}
+              >
+                {copiedBuildLogs ? (
+                  <>
+                    <Check className="size-3" />
+                    Copied
+                  </>
+                ) : (
+                  <>
+                    <Copy className="size-3" />
+                    Copy logs
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
           <div
             className="flex-1 rounded-lg border overflow-y-auto p-3 font-mono text-xs leading-relaxed"
