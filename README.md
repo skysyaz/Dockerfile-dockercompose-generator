@@ -18,9 +18,27 @@ cp .env.example .env
 docker compose up --build -d
 ```
 
-Open http://localhost:3000
+Open http://localhost:5172
+
+### One container, two ports
+
+DockGen runs as a **single Docker container** with two processes inside:
+
+| Port | Service |
+|------|---------|
+| `5172` | Next.js web UI |
+| `5173` | WebSocket build service (Test Build) |
+
+You do **not** need two containers. Both services start from `scripts/start.sh` in the same image.
 
 The Test Build feature requires mounting `/var/run/docker.sock` (included in `docker-compose.yml`).
+
+### Dokploy deployment
+
+1. Create a **Docker Compose** app pointing at this repo
+2. Set container ports: `5172` (web) and `5173` (WebSocket)
+3. Copy env vars from `.env.example`
+4. Ensure `docker.sock` volume is mounted for Test Build
 
 ## Local development
 

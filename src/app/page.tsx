@@ -269,7 +269,8 @@ export default function HomePage() {
     setBuildRunning(true);
     setBuildDone(null);
 
-    const socket = ioClient("/?XTransformPort=3003", {
+    const buildPort = process.env.NEXT_PUBLIC_BUILD_SERVICE_PORT || "5173";
+    const socket = ioClient(`/?XTransformPort=${buildPort}`, {
       transports: ["websocket", "polling"],
       reconnection: false,
       timeout: 15000,

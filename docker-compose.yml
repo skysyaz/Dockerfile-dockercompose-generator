@@ -1,13 +1,18 @@
+# Single container — two processes inside (Next.js + build WebSocket service)
 services:
   dockgen:
     build: .
     container_name: dockgen
     ports:
-      - "3000:3000"
-      - "3003:3003"
+      - "${PORT:-5172}:${PORT:-5172}"           # Web UI
+      - "${BUILD_SERVICE_PORT:-5173}:${BUILD_SERVICE_PORT:-5173}"  # Test Build WebSocket
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
       - NODE_ENV=production
+      - PORT=${PORT:-5172}
+      - BUILD_SERVICE_PORT=${BUILD_SERVICE_PORT:-5173}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

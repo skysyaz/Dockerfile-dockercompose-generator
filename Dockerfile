@@ -40,8 +40,10 @@ COPY --chown=nextjs:nodejs scripts/start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
 USER nextjs
-EXPOSE 3000 3003
-ENV PORT=3000
+EXPOSE 5172 5173
+ENV PORT=5172
+ENV BUILD_SERVICE_PORT=5173
+ENV NEXT_PUBLIC_BUILD_SERVICE_PORT=5173
 ENV HOSTNAME=0.0.0.0
 VOLUME ["/var/run/docker.sock"]
 CMD ["/app/start.sh"]

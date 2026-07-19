@@ -9,7 +9,7 @@ import * as os from "os";
 import * as tar from "tar";
 import { Server } from "socket.io";
 
-const PORT = Number(process.env.BUILD_SERVICE_PORT || 3003);
+const PORT = Number(process.env.BUILD_SERVICE_PORT || 5173);
 
 function parseGithubUrl(url) {
   const m = url.match(/github\.com[/:]([^/]+)\/([^/#?]+)/);
