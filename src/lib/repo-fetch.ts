@@ -5,11 +5,13 @@ import * as fs from "fs/promises";
 import * as tar from "tar";
 import {
   getProviderLabel,
+  isPrivateGitHost,
   parseRepoUrl,
   type ParsedRepoUrl,
 } from "./repo-url";
 
 const DEFAULT_BRANCHES = ["main", "master", "HEAD"];
+const EXTRACT_TIMEOUT_MS = 300_000;
 
 async function extractTarball(response: Response, dest: string): Promise<void> {
   if (!response.ok) {
@@ -32,6 +34,7 @@ async function extractTarball(response: Response, dest: string): Promise<void> {
         return !normalized.startsWith("/") && !normalized.includes("..");
       },
     }),
+    { signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS) },
   );
 }
 
@@ -143,9 +146,10 @@ async function fetchBitbucketArchive(
         continue;
       }
       if (res.status === 401 || res.status === 403) {
-        throw new Error(
+        lastError = new Error(
           `fatal: Authentication failed for https://bitbucket.org/${parsed.projectPath}. Provide a Bitbucket app password or access token.`,
         );
+        break;
       }
       lastError = new Error(`Bitbucket returned ${res.status}`);
     } catch (error) {
@@ -161,6 +165,15 @@ async function fetchGiteaArchive(
   dest: string,
   accessToken?: string,
 ): Promise<void> {
+  if (
+    isPrivateGitHost(parsed.host) &&
+    process.env.ALLOW_PRIVATE_GIT_HOSTS !== "true"
+  ) {
+    throw new Error(
+      `Refusing to fetch from private or internal host '${parsed.host}'. ` +
+        "Set ALLOW_PRIVATE_GIT_HOSTS=true on the server to allow internal Git hosts.",
+    );
+  }
   const [owner, repo] = parsed.projectPath.split("/");
   const headers: Record<string, string> = {
     "User-Agent": "DockGen/1.0",
@@ -181,9 +194,10 @@ async function fetchGiteaArchive(
         continue;
       }
       if (res.status === 401 || res.status === 403) {
-        throw new Error(
+        lastError = new Error(
           `fatal: Authentication failed for https://${parsed.host}/${parsed.projectPath}. Provide an access token with repository read scope.`,
         );
+        break;
       }
       lastError = new Error(`${getProviderLabel(parsed.provider)} returned ${res.status}`);
     } catch (error) {

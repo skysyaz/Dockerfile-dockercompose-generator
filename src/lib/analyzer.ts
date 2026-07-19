@@ -59,6 +59,8 @@ const BACKEND_MARKERS = [
   "deno.json",
   "deno.jsonc",
   "CMakeLists.txt",
+  "*.csproj",
+  "*.sln",
 ];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -218,8 +220,9 @@ async function findBackendSubdir(root: string, depth = 0): Promise<string> {
 
 async function hasBackendMarkers(dir: string): Promise<boolean> {
   for (const marker of BACKEND_MARKERS) {
-    if (marker.endsWith(".csproj")) {
-      const files = await globFiles(dir, "*.csproj", 0);
+    if (marker.startsWith("*.")) {
+      // Only check this directory itself (maxDepth 0), not nested folders.
+      const files = await globFiles(dir, marker, 0, 0);
       if (files.length) return true;
     } else if (await fileExists(path.join(dir, marker))) {
       return true;
@@ -232,6 +235,7 @@ async function findBackendInChildren(
   root: string,
   depth: number,
 ): Promise<string> {
+  if (depth > 3) return "";
   const entries = await fs.readdir(root, { withFileTypes: true });
   for (const entry of entries) {
     if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;

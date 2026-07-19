@@ -209,9 +209,25 @@ io.on("connection", (socket) => {
           const downCommand = await resolveComposeCommand();
           if (downCommand) {
             const downArgs = downCommand(["down", "--volumes", "--remove-orphans"]);
-            spawn(downArgs[0], downArgs.slice(1), {
-              cwd: workDir,
-              env: dockerEnv(),
+            // Wait for teardown before deleting workDir — compose needs the
+            // compose file in cwd to know what to remove.
+            await new Promise((resolve) => {
+              const down = spawn(downArgs[0], downArgs.slice(1), {
+                cwd: workDir,
+                env: dockerEnv(),
+              });
+              const timer = setTimeout(() => {
+                down.kill("SIGKILL");
+                resolve();
+              }, 60_000);
+              down.on("close", () => {
+                clearTimeout(timer);
+                resolve();
+              });
+              down.on("error", () => {
+                clearTimeout(timer);
+                resolve();
+              });
             });
           }
         }

@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import {
+  isPrivateGitHost,
   parseRepoUrl,
   resolveAccessToken,
 } from "../mini-services/docker-build-service/repo-providers.js";
@@ -38,5 +39,11 @@ describe("build-service repo providers", () => {
     process.env.GITHUB_TOKEN = "env-token";
     assert.equal(resolveAccessToken("github"), "env-token");
     assert.equal(resolveAccessToken("github", "   "), "env-token");
+  });
+
+  it("mirrors the private-host SSRF guard", () => {
+    assert.equal(isPrivateGitHost("localhost:3000"), true);
+    assert.equal(isPrivateGitHost("192.168.1.10"), true);
+    assert.equal(isPrivateGitHost("git.example.com"), false);
   });
 });

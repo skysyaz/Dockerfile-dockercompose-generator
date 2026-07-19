@@ -5,6 +5,45 @@ import * as fs from "fs/promises";
 import * as tar from "tar";
 
 const DEFAULT_BRANCHES = ["main", "master", "HEAD"];
+const EXTRACT_TIMEOUT_MS = 300_000;
+
+export function isPrivateGitHost(host) {
+  let name = String(host).toLowerCase();
+  const bracketed = name.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) {
+    name = bracketed[1];
+  } else {
+    name = name.replace(/:\d+$/, "");
+  }
+
+  if (/^(localhost|.+\.localhost|.+\.local|.+\.internal|.+\.home\.arpa)$/.test(name)) {
+    return true;
+  }
+
+  const ipv4 = name.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+
+  if (name.includes(":")) {
+    return (
+      name === "::" ||
+      name === "::1" ||
+      /^(fe80|fc[0-9a-f]{2}|fd[0-9a-f]{2}):/.test(name)
+    );
+  }
+
+  return !name.includes(".");
+}
 
 export function parseRepoUrl(url) {
   const trimmed = url.trim().replace(/\/$/, "");
@@ -110,6 +149,7 @@ async function extractTarball(response, dest) {
         return !normalized.startsWith("/") && !normalized.includes("..");
       },
     }),
+    { signal: AbortSignal.timeout(EXTRACT_TIMEOUT_MS) },
   );
 }
 
@@ -198,6 +238,12 @@ export async function fetchRepoArchive(repoUrl, dest, accessToken) {
     throw new Error(`Could not download Bitbucket archive for ${parsed.projectPath}`);
   }
 
+  if (isPrivateGitHost(parsed.host) && process.env.ALLOW_PRIVATE_GIT_HOSTS !== "true") {
+    throw new Error(
+      `Refusing to fetch from private or internal host '${parsed.host}'. ` +
+        "Set ALLOW_PRIVATE_GIT_HOSTS=true on the server to allow internal Git hosts.",
+    );
+  }
   const [owner, repo] = parsed.projectPath.split("/");
   for (const branch of DEFAULT_BRANCHES) {
     const res = await fetchWithTimeout(
