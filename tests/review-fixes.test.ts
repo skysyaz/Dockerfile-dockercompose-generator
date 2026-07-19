@@ -287,6 +287,19 @@ RUN bun install --frozen-lockfile
     assert.ok(fixed.fixes.some((fix) => fix.includes("dependency COPY")));
   });
 
+  it("leaves monorepo and non-manifest COPY lines untouched", () => {
+    const dockerfile = `FROM node:20-alpine
+COPY apps/web/package.json ./
+COPY package.json packages/shared/package.json ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=node:node package.json yarn.lock ./
+COPY apps/web ./apps/web
+`;
+    const fixed = sanitizeDockerfileLockfiles(dockerfile, ["package.json"]);
+    assert.equal(fixed.content, dockerfile);
+    assert.deepEqual(fixed.fixes, []);
+  });
+
   it("removes frozen lockfile install when the referenced lockfile is missing", () => {
     const dockerfile = `FROM node:20-slim
 COPY package.json ./

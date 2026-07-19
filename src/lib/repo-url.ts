@@ -165,19 +165,18 @@ export function resolveAccessToken(
 ): string | undefined {
   const token = requestToken?.trim();
   if (token) return token;
+  // Never fall back to another provider's token: it would not authenticate
+  // and would leak the credential to a foreign (possibly self-hosted) API.
   switch (provider) {
     case "github":
       return process.env.GITHUB_TOKEN || undefined;
     case "gitlab":
-      return process.env.GITLAB_TOKEN || process.env.GITHUB_TOKEN || undefined;
+      return process.env.GITLAB_TOKEN || undefined;
     case "bitbucket":
       return process.env.BITBUCKET_TOKEN || undefined;
+    case "codeberg":
+    case "gitea":
     default:
-      return (
-        process.env.GITHUB_TOKEN ||
-        process.env.GITLAB_TOKEN ||
-        process.env.GITEA_TOKEN ||
-        undefined
-      );
+      return process.env.GITEA_TOKEN || undefined;
   }
 }
