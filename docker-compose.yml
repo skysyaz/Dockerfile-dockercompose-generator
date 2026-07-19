@@ -2,7 +2,10 @@
 # Service name must be `app` for Dokploy domain routing
 services:
   app:
-    build: .
+    build:
+      context: .
+      args:
+        DOCKER_GID: ${DOCKER_GID:-999}
     container_name: dockgen
     ports:
       - "${PORT:-5172}:${PORT:-5172}"           # Web UI

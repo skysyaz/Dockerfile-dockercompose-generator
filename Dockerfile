@@ -31,8 +31,11 @@ ARG DOCKER_GID=999
 RUN apk add --no-cache docker-cli docker-cli-compose && \
     addgroup -g 1001 -S nodejs && \
     adduser -S nextjs -u 1001 -G nodejs && \
-    addgroup -g ${DOCKER_GID} -S docker && \
-    adduser nextjs docker
+    if getent group "${DOCKER_GID}" >/dev/null 2>&1; then \
+      adduser nextjs "$(getent group "${DOCKER_GID}" | cut -d: -f1)"; \
+    else \
+      addgroup -g "${DOCKER_GID}" -S docker && adduser nextjs docker; \
+    fi
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
