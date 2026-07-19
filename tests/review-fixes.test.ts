@@ -18,7 +18,7 @@ import {
   sanitizePort,
 } from "../src/lib/validation.ts";
 import type { AnalysisResult } from "../src/lib/types.ts";
-import { dependencyCopyLine, installCmd } from "../src/lib/node-docker.ts";
+import { dependencyCopyLine, installCmd, sanitizeDockerfileLockfiles } from "../src/lib/node-docker.ts";
 
 const baseAnalysis: AnalysisResult = {
   repoUrl: "https://github.com/user/app",
@@ -274,6 +274,28 @@ describe("node-docker lockfile handling", () => {
     assert.equal(installCmd("npm", []), "RUN npm install");
     assert.equal(installCmd("npm", ["package-lock.json"]), "RUN npm ci");
   });
+
+  it("sanitizes COPY lines that target . without a trailing slash", () => {
+    const dockerfile = `FROM node:20-slim
+COPY package.json bun.lock .
+RUN bun install --frozen-lockfile
+`;
+    const fixed = sanitizeDockerfileLockfiles(dockerfile, ["package.json", "bun.lockb"]);
+    assert.match(fixed.content, /COPY package\*\.json bun\.lockb \.\//);
+    assert.doesNotMatch(fixed.content, /bun\.lock[^b]/);
+    assert.match(fixed.content, /RUN bun install --frozen-lockfile/);
+    assert.ok(fixed.fixes.some((fix) => fix.includes("dependency COPY")));
+  });
+
+  it("removes frozen lockfile install when the referenced lockfile is missing", () => {
+    const dockerfile = `FROM node:20-slim
+COPY package.json ./
+RUN bun install --frozen-lockfile
+`;
+    const fixed = sanitizeDockerfileLockfiles(dockerfile, ["package.json"]);
+    assert.match(fixed.content, /RUN bun install$/m);
+    assert.ok(fixed.fixes.some((fix) => fix.includes("frozen-lockfile")));
+  });
 });
 
 describe("auditExistingFiles", () => {
@@ -300,6 +322,40 @@ describe("auditExistingFiles", () => {
     const result = auditExistingFiles(existing, generated, baseAnalysis, { port: 8080 });
     assert.match(result.files["docker-compose.yml"], /8080:8080/);
     assert.match(result.files["docker-compose.yml"], /5432:5432/);
+  });
+
+  it("rewrites sky-bloom-shop style Dockerfiles with bun.lockb only", () => {
+    const existing = {
+      Dockerfile: `FROM node:20-slim
+RUN apt-get update && apt-get install -y curl unzip && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL https://bun.sh/install | bash
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --frozen-lockfile
+COPY . .
+RUN bun run build
+EXPOSE 3000
+CMD ["bun", "run", "start"]
+`,
+    };
+    const generated = {
+      Dockerfile: "FROM node:20-alpine\n",
+      "docker-compose.yml": "services:\n  app:\n    build: .\n",
+      ".dockerignore": "node_modules\n",
+      ".env.example": "",
+    };
+    const analysis: AnalysisResult = {
+      ...baseAnalysis,
+      language: "javascript",
+      framework: "vite",
+      packageManager: "bun",
+      rootFiles: ["package.json", "bun.lockb"],
+    };
+
+    const result = auditExistingFiles(existing, generated, analysis, {});
+    assert.match(result.files.Dockerfile, /COPY package\*\.json bun\.lockb \.\//);
+    assert.doesNotMatch(result.files.Dockerfile, /\bbun\.lock\b/);
+    assert.match(result.files.Dockerfile, /RUN bun install --frozen-lockfile/);
   });
 
   it("rewrites dependency COPY to drop missing lockfiles", () => {

@@ -69,7 +69,7 @@ export async function POST(request: NextRequest) {
     let analysis = getCachedAnalysis(repoUrl, token);
     let cloneDir = getCachedCloneDir(repoUrl, token);
 
-    if (!analysis) {
+    if (!analysis || !Array.isArray(analysis.rootFiles) || !cloneDir) {
       const result = await cloneAndAnalyze(repoUrl, token);
       analysis = result.analysis;
       cloneDir = result.dir;

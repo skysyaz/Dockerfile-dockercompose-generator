@@ -9,7 +9,7 @@ import {
   resolveComposeServices,
 } from "./env-discovery";
 import { fetchRepoArchive } from "./repo-fetch";
-import { buildCmd, dependencyCopyLine, installCmd } from "./node-docker";
+import { buildCmd, dependencyCopyLine, installCmd, sanitizeDockerfileLockfiles } from "./node-docker";
 import { parseGithubUrl, parseRepoUrl } from "./repo-url";
 import type {
   AnalysisResult,
@@ -167,28 +167,42 @@ export async function buildGeneratedFiles(
   customizations: Customizations = {},
   cloneDir?: string,
 ): Promise<{ files: GeneratedFiles; auditFixes: string[] }> {
-  const generated = generateAllFiles(analysis, customizations);
+  const effectiveAnalysis = cloneDir
+    ? await refreshAnalysisRootFiles(analysis, cloneDir)
+    : analysis;
+  const generated = generateAllFiles(effectiveAnalysis, customizations);
   if (!cloneDir) return { files: generated, auditFixes: [] };
 
-  const workDir = workDirFromClone(cloneDir, analysis.backendSubdir);
+  const workDir = workDirFromClone(cloneDir, effectiveAnalysis.backendSubdir);
   const existing = await readExistingDockerFiles(workDir);
   const existingNames = Object.keys(existing);
-  if (!existingNames.length) return { files: generated, auditFixes: [] };
+  let files: GeneratedFiles = generated;
+  const auditFixes: string[] = [];
 
-  const audited = auditExistingFiles(
-    existing,
-    { ...generated } as Record<string, string>,
-    analysis,
-    customizations,
-  );
-
-  return {
-    files: audited.files as unknown as GeneratedFiles,
-    auditFixes: [
+  if (existingNames.length) {
+    const audited = auditExistingFiles(
+      existing,
+      { ...generated } as Record<string, string>,
+      effectiveAnalysis,
+      customizations,
+    );
+    files = audited.files as unknown as GeneratedFiles;
+    auditFixes.push(
       `Found existing Docker config: ${existingNames.join(", ")}`,
       ...audited.fixes,
-    ],
-  };
+    );
+  }
+
+  const lockfileFix = sanitizeDockerfileLockfiles(
+    files.Dockerfile,
+    effectiveAnalysis.rootFiles ?? [],
+  );
+  if (lockfileFix.content !== files.Dockerfile) {
+    files = { ...files, Dockerfile: lockfileFix.content };
+    auditFixes.push(...lockfileFix.fixes);
+  }
+
+  return { files, auditFixes };
 }
 
 async function findBackendSubdir(root: string, depth = 0): Promise<string> {
@@ -415,7 +429,7 @@ export async function detectDotnetProject(
   return { project, solution, sdkVersion };
 }
 
-function detectPackageManager(root: string, files: string[]): string {
+function detectPackageManager(files: string[], packageManagerField = ""): string {
   if (files.includes("pnpm-lock.yaml")) return "pnpm";
   if (files.includes("yarn.lock")) return "yarn";
   if (files.includes("bun.lock") || files.includes("bun.lockb")) return "bun";
@@ -432,13 +446,29 @@ function detectPackageManager(root: string, files: string[]): string {
   if (files.some((f) => f.endsWith(".csproj") || f.endsWith(".sln")))
     return "nuget";
   if (files.includes("go.mod")) return "go-modules";
-  if (files.includes("package.json")) return "npm";
+  if (files.includes("package.json")) {
+    if (packageManagerField.startsWith("pnpm@")) return "pnpm";
+    if (packageManagerField.startsWith("yarn@")) return "yarn";
+    if (packageManagerField.startsWith("bun@")) return "bun";
+    if (packageManagerField.startsWith("npm@")) return "npm";
+    return "npm";
+  }
   return "unknown";
 }
 
 async function listRootFiles(dir: string): Promise<string[]> {
-  const entries = await fs.readdir(dir);
-  return entries;
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+}
+
+async function refreshAnalysisRootFiles(
+  analysis: AnalysisResult,
+  cloneDir: string,
+): Promise<AnalysisResult> {
+  const workDir = workDirFromClone(cloneDir, analysis.backendSubdir);
+  const rootFiles = await listRootFiles(workDir);
+  if (!rootFiles.length) return analysis;
+  return { ...analysis, rootFiles };
 }
 
 async function readDependencies(
@@ -879,17 +909,20 @@ async function detectFramework(
     let parsed: {
       dependencies?: Record<string, string>;
       devDependencies?: Record<string, string>;
+      packageManager?: string;
     } = {};
     try {
       parsed = JSON.parse(pkg);
     } catch {
       /* ignore */
     }
+    const packageManagerField = parsed.packageManager ?? "";
     const allDeps = {
       ...parsed.dependencies,
       ...parsed.devDependencies,
     };
     const depNames = Object.keys(allDeps).join(" ").toLowerCase();
+    const pm = () => detectPackageManager(files, packageManagerField);
 
     if (allDeps.next) {
       notes.push("Detected Next.js — using standalone multi-stage Dockerfile.");
@@ -898,7 +931,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: "server.js",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -908,7 +941,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: ".output/server/index.mjs",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -918,7 +951,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: "build",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -928,7 +961,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: "main.ts",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -938,7 +971,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: "index.js",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -948,7 +981,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 4173,
         entrypoint: "index.html",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -958,7 +991,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: "src/index.tsx",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -968,7 +1001,7 @@ async function detectFramework(
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: "src/main.ts",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -978,7 +1011,7 @@ async function detectFramework(
         language: "typescript",
         port: 4200,
         entrypoint: "src/main.ts",
-        buildTool: detectPackageManager(workDir, files),
+        buildTool: pm(),
         notes,
       };
     }
@@ -987,7 +1020,7 @@ async function detectFramework(
       language: depNames.includes("typescript") ? "typescript" : "javascript",
       port: 3000,
       entrypoint: "index.js",
-      buildTool: detectPackageManager(workDir, files),
+      buildTool: pm(),
       notes,
     };
   }
@@ -1017,7 +1050,16 @@ export async function analyzeDirectory(
 
   const detection = await detectFramework(workDir);
   const rootFiles = await listRootFiles(workDir);
-  const packageManager = detectPackageManager(workDir, rootFiles);
+  let packageManagerField = "";
+  if (rootFiles.includes("package.json")) {
+    try {
+      const pkg = JSON.parse(await readText(path.join(workDir, "package.json")));
+      packageManagerField = String(pkg.packageManager ?? "");
+    } catch {
+      /* ignore */
+    }
+  }
+  const packageManager = detectPackageManager(rootFiles, packageManagerField);
   const dependencies = await readDependencies(workDir, detection.framework);
   const services = detectServices(dependencies);
   const existing = await readExistingDockerFiles(workDir);
