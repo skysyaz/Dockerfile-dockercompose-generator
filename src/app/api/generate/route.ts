@@ -6,11 +6,14 @@ import {
   getCachedCloneDir,
   redactSecrets,
 } from "@/lib/analyzer";
+import { buildEffectiveEnvVars } from "@/lib/env-discovery";
 import { parseRepoUrl, resolveAccessToken } from "@/lib/repo-url";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import type { Customizations } from "@/lib/types";
 import {
   sanitizeBaseImageVersion,
+  sanitizeDatabaseMode,
+  sanitizeEnvValues,
   sanitizeExtraEnv,
   sanitizePort,
 } from "@/lib/validation";
@@ -34,6 +37,8 @@ export async function POST(request: NextRequest) {
       baseImageVersion?: string;
       extraEnv?: Record<string, string>;
       enabledServices?: string[];
+      databaseMode?: "bundled" | "external";
+      envValues?: Record<string, string>;
     };
 
     const repoUrl = body.repoUrl?.trim();
@@ -57,6 +62,8 @@ export async function POST(request: NextRequest) {
       baseImageVersion: sanitizeBaseImageVersion(body.baseImageVersion),
       extraEnv: sanitizeExtraEnv(body.extraEnv),
       enabledServices: body.enabledServices,
+      databaseMode: sanitizeDatabaseMode(body.databaseMode),
+      envValues: sanitizeEnvValues(body.envValues),
     };
 
     let analysis = getCachedAnalysis(repoUrl, token);
@@ -82,6 +89,7 @@ export async function POST(request: NextRequest) {
     const enrichedAnalysis = {
       ...analysis,
       port: effectivePort,
+      envVars: buildEffectiveEnvVars(analysis, customizations),
       auditFixes,
       notes: newNotes.length ? [...analysis.notes, ...newNotes] : analysis.notes,
     };

@@ -1,6 +1,13 @@
 import * as fs from "fs/promises";
 import * as path from "path";
 import { auditExistingFiles, type ExistingDockerFiles } from "./docker-audit";
+import {
+  applyEnvValues,
+  buildEffectiveEnvVars,
+  discoverEnvVars,
+  formatEnvFile,
+  resolveComposeServices,
+} from "./env-discovery";
 import { fetchRepoArchive } from "./repo-fetch";
 import { parseGithubUrl, parseRepoUrl } from "./repo-url";
 import type {
@@ -939,6 +946,21 @@ export async function analyzeDirectory(
     );
   }
 
+  const envVars = await discoverEnvVars(workDir, {
+    framework: detection.framework,
+    services,
+    repoName,
+    port: detection.port,
+    databaseMode: "bundled",
+  });
+
+  if (envVars.length) {
+    const requiredCount = envVars.filter((variable) => variable.required).length;
+    detection.notes.push(
+      `Discovered ${envVars.length} environment variable(s) (${requiredCount} required) from repo config, dependencies, and source scan.`,
+    );
+  }
+
   return {
     repoUrl,
     repoName,
@@ -955,6 +977,7 @@ export async function analyzeDirectory(
     backendSubdir,
     dotnetProject: dotnet.project,
     dotnetSolution: dotnet.solution,
+    envVars,
     existingFiles,
   };
 }
@@ -1396,14 +1419,16 @@ export function generateDockerCompose(
     customizations.enabledServices ??
       analysis.services.map((s) => s.name),
   );
-  const activeServices = analysis.services.filter((s) =>
-    enabled.has(s.name),
+  const activeServices = resolveComposeServices(
+    analysis.services,
+    enabled,
+    customizations.databaseMode ?? "bundled",
   );
   const repo = analysis.repoName;
 
   let yaml = `services:\n  app:\n    build: .\n    container_name: ${repo}-app\n    ports:\n      - "${port}:${port}"\n    restart: unless-stopped\n`;
 
-  if (ENV_FRAMEWORKS.has(analysis.framework)) {
+  if (ENV_FRAMEWORKS.has(analysis.framework) || analysis.envVars.length) {
     yaml += `    env_file:\n      - .env\n`;
   }
 
@@ -1506,134 +1531,18 @@ Cargo.lock
   return common;
 }
 
-function envSections(
-  analysis: AnalysisResult,
-  enabledServices: DetectedService[],
-  port: number,
-  extraEnv?: Record<string, string>,
-  withComments = true,
-): string {
-  const lines: string[] = [];
-  const push = (line: string) => lines.push(line);
-
-  if (withComments) {
-    push("# Copy this file to .env and adjust values for your environment.");
-    push("# Lines beginning with # are comments. Do NOT commit the real .env file.");
-    push("");
-  }
-
-  if (enabledServices.some((s) => s.name === "postgres")) {
-    push("# PostgreSQL");
-    push("DATABASE_URL=postgresql://app:app@postgres:5432/app");
-    push("POSTGRES_USER=app");
-    push("POSTGRES_PASSWORD=app");
-    push("POSTGRES_DB=app");
-    push("");
-  }
-
-  if (enabledServices.some((s) => s.name === "mysql")) {
-    push("# MySQL");
-    push("DATABASE_URL=mysql://app:app@mysql:3306/app");
-    push("MYSQL_ROOT_PASSWORD=root");
-    push("MYSQL_DATABASE=app");
-    push("");
-  }
-
-  if (enabledServices.some((s) => s.name === "redis")) {
-    push("# Redis");
-    push("REDIS_URL=redis://redis:6379");
-    push("");
-  }
-
-  if (enabledServices.some((s) => s.name === "mongodb")) {
-    push("# MongoDB");
-    push("MONGO_URL=mongodb://app:app@mongodb:27017/app");
-    push("MONGO_INITDB_ROOT_USERNAME=app");
-    push("MONGO_INITDB_ROOT_PASSWORD=app");
-    push("");
-  }
-
-  switch (analysis.framework) {
-    case "nextjs":
-    case "nodejs":
-    case "express":
-    case "nestjs":
-      push("# Node.js");
-      push("NODE_ENV=production");
-      push(`PORT=${port}`);
-      push("");
-      break;
-    case "django":
-      push("# Django");
-      push(`DJANGO_SETTINGS_MODULE=${analysis.repoName}.settings`);
-      push("DJANGO_DEBUG=False");
-      push("DJANGO_SECRET_KEY=change-me-please");
-      push("");
-      break;
-    case "flask":
-    case "fastapi":
-      push("# Python app");
-      push("APP_ENV=production");
-      push(`PORT=${port}`);
-      push("");
-      break;
-    case "rails":
-      push("# Rails");
-      push("RAILS_ENV=production");
-      push("RAILS_LOG_TO_STDOUT=true");
-      push("RAILS_SERVE_STATIC_FILES=true");
-      push("RAILS_MASTER_KEY=change-me-please");
-      push("");
-      break;
-    case "laravel":
-      push("# Laravel");
-      push("APP_ENV=production");
-      push("APP_KEY=base64:change-me-please");
-      push("APP_DEBUG=false");
-      push("APP_URL=http://localhost:8000");
-      push("");
-      break;
-    case "spring-boot":
-      push("# Spring Boot");
-      push("SPRING_PROFILES_ACTIVE=production");
-      push(`SERVER_PORT=${port}`);
-      push("");
-      break;
-    case "dotnet":
-      push("# .NET");
-      push("ASPNETCORE_ENVIRONMENT=Production");
-      push(`ASPNETCORE_URLS=http://+:${port}`);
-      push("");
-      break;
-  }
-
-  if (extraEnv && Object.keys(extraEnv).length) {
-    push("# Custom environment variables");
-    for (const [key, value] of Object.entries(extraEnv)) {
-      push(`${key}=${value}`);
-    }
-    push("");
-  }
-
-  return lines.join("\n").trimEnd() + "\n";
-}
-
 export function generateEnvExample(
   analysis: AnalysisResult,
   customizations: Customizations = {},
 ): string | null {
-  if (!ENV_FRAMEWORKS.has(analysis.framework) && !analysis.services.length) {
-    return null;
-  }
-  const port = customizations.port ?? analysis.port;
-  const enabled = new Set(
-    customizations.enabledServices ??
-      analysis.services.map((s) => s.name),
+  const effectiveVars = buildEffectiveEnvVars(analysis, customizations);
+  if (!effectiveVars.length) return null;
+  const resolved = applyEnvValues(
+    effectiveVars,
+    customizations.envValues,
+    customizations.extraEnv,
   );
-  const activeServices = analysis.services.filter((s) =>
-    enabled.has(s.name),
-  );
-  return envSections(analysis, activeServices, port, customizations.extraEnv, true);
+  return formatEnvFile(resolved, customizations.envValues, true);
 }
 
 export function generateEnv(
@@ -1642,18 +1551,13 @@ export function generateEnv(
 ): string | null {
   const example = generateEnvExample(analysis, customizations);
   if (!example) return null;
-  const port = customizations.port ?? analysis.port;
-  return envSections(
-    analysis,
-    analysis.services.filter((s) =>
-      (customizations.enabledServices ?? analysis.services.map((x) => x.name)).includes(
-        s.name,
-      ),
-    ),
-    port,
+  const effectiveVars = buildEffectiveEnvVars(analysis, customizations);
+  const resolved = applyEnvValues(
+    effectiveVars,
+    customizations.envValues,
     customizations.extraEnv,
-    false,
   );
+  return formatEnvFile(resolved, customizations.envValues, false);
 }
 
 export function generateAllFiles(

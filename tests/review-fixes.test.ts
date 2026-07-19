@@ -40,6 +40,7 @@ const baseAnalysis: AnalysisResult = {
   backendSubdir: "",
   dotnetProject: "",
   dotnetSolution: "",
+  envVars: [],
   existingFiles: [],
 };
 

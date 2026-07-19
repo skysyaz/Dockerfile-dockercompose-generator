@@ -62,6 +62,36 @@ export interface DetectedService {
 
 export type RepoProvider = "github" | "gitlab" | "bitbucket" | "codeberg" | "gitea";
 
+export type EnvVarCategory =
+  | "database"
+  | "cache"
+  | "secret"
+  | "auth"
+  | "framework"
+  | "config"
+  | "other";
+
+export type EnvVarSource =
+  | "env-example"
+  | "appsettings"
+  | "application-config"
+  | "django-settings"
+  | "source-scan"
+  | "dependency-inference"
+  | "framework-default";
+
+export interface DiscoveredEnvVar {
+  key: string;
+  suggestedValue: string;
+  category: EnvVarCategory;
+  source: EnvVarSource;
+  required: boolean;
+  description?: string;
+  sensitive?: boolean;
+}
+
+export type DatabaseMode = "bundled" | "external";
+
 export interface AnalysisResult {
   repoUrl: string;
   repoName: string;
@@ -78,6 +108,7 @@ export interface AnalysisResult {
   backendSubdir: string;
   dotnetProject: string;
   dotnetSolution: string;
+  envVars: DiscoveredEnvVar[];
   existingFiles: string[];
   auditFixes?: string[];
 }
@@ -87,6 +118,8 @@ export interface Customizations {
   baseImageVersion?: string;
   extraEnv?: Record<string, string>;
   enabledServices?: string[];
+  databaseMode?: DatabaseMode;
+  envValues?: Record<string, string>;
 }
 
 export interface GeneratedFiles {

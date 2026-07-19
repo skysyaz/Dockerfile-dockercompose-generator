@@ -1,3 +1,5 @@
+import type { DatabaseMode } from "./types";
+
 const ALLOWED_BUILD_FILES = new Set([
   "Dockerfile",
   "docker-compose.yml",
@@ -29,18 +31,37 @@ export function sanitizeBaseImageVersion(version?: string): string | undefined {
 export function sanitizeExtraEnv(
   extraEnv?: Record<string, string>,
 ): Record<string, string> | undefined {
-  if (!extraEnv) return undefined;
+  return sanitizeEnvMap(extraEnv, "environment variable");
+}
+
+export function sanitizeEnvValues(
+  envValues?: Record<string, string>,
+): Record<string, string> | undefined {
+  return sanitizeEnvMap(envValues, "environment value");
+}
+
+function sanitizeEnvMap(
+  values: Record<string, string> | undefined,
+  label: string,
+): Record<string, string> | undefined {
+  if (!values) return undefined;
   const sanitized: Record<string, string> = {};
-  for (const [key, value] of Object.entries(extraEnv)) {
+  for (const [key, value] of Object.entries(values)) {
     if (!ENV_KEY_PATTERN.test(key)) {
-      throw new Error(`Invalid environment variable name: ${key}`);
+      throw new Error(`Invalid ${label} name: ${key}`);
     }
     if (typeof value !== "string" || value.includes("\n")) {
-      throw new Error(`Invalid environment variable value for ${key}`);
+      throw new Error(`Invalid ${label} for ${key}`);
     }
     sanitized[key] = value;
   }
   return Object.keys(sanitized).length ? sanitized : undefined;
+}
+
+export function sanitizeDatabaseMode(mode?: string): DatabaseMode | undefined {
+  if (!mode) return undefined;
+  if (mode === "bundled" || mode === "external") return mode;
+  throw new Error('databaseMode must be "bundled" or "external"');
 }
 
 export function sanitizePort(port?: number): number | undefined {

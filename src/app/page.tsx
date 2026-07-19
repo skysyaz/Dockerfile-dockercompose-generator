@@ -55,7 +55,13 @@ import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeBlock } from "@/components/code-block";
 import { getProviderLabel, parseRepoUrl } from "@/lib/repo-url";
-import type { AnalysisResult, BuildLogLine, GeneratedFiles, RepoProvider } from "@/lib/types";
+import type {
+  AnalysisResult,
+  BuildLogLine,
+  DatabaseMode,
+  GeneratedFiles,
+  RepoProvider,
+} from "@/lib/types";
 
 const SAMPLE_REPOS = [
   { label: "Next.js", url: "https://github.com/vercel/commerce" },
@@ -105,6 +111,7 @@ const LOADING_STEPS = [
   "Detecting language & framework...",
   "Analyzing dependencies...",
   "Identifying services (database, cache)...",
+  "Discovering environment variables...",
   "Done.",
 ];
 
@@ -130,6 +137,22 @@ function getSyntaxLanguage(filename: string): string {
   return "bash";
 }
 
+function envValuesFromAnalysis(analysis: AnalysisResult): Record<string, string> {
+  return Object.fromEntries(
+    analysis.envVars.map((variable) => [variable.key, variable.suggestedValue]),
+  );
+}
+
+const ENV_SOURCE_LABELS: Record<string, string> = {
+  "env-example": "repo .env",
+  appsettings: "appsettings",
+  "application-config": "config file",
+  "django-settings": "Django",
+  "source-scan": "source code",
+  "dependency-inference": "dependencies",
+  "framework-default": "framework",
+};
+
 export default function HomePage() {
   const [repoUrl, setRepoUrl] = useState("");
   const [githubToken, setGithubToken] = useState("");
@@ -145,6 +168,8 @@ export default function HomePage() {
   const [portOverride, setPortOverride] = useState("");
   const [baseImageVersion, setBaseImageVersion] = useState("");
   const [extraEnv, setExtraEnv] = useState<{ key: string; value: string }[]>([]);
+  const [envValues, setEnvValues] = useState<Record<string, string>>({});
+  const [databaseMode, setDatabaseMode] = useState<DatabaseMode>("bundled");
   const [regenerating, setRegenerating] = useState(false);
   const [copiedFile, setCopiedFile] = useState<string | null>(null);
   const [copiedBuildLogs, setCopiedBuildLogs] = useState(false);
@@ -202,6 +227,8 @@ export default function HomePage() {
     setPortOverride("");
     setBaseImageVersion("");
     setExtraEnv([]);
+    setEnvValues({});
+    setDatabaseMode("bundled");
     setLoadingStep(0);
   }, []);
 
@@ -214,7 +241,10 @@ export default function HomePage() {
         baseImageVersion?: string;
         extraEnv?: Record<string, string>;
         enabledServices?: string[];
+        databaseMode?: DatabaseMode;
+        envValues?: Record<string, string>;
       },
+      options?: { preserveEnvEdits?: boolean },
     ) => {
       const res = await fetch("/api/generate", {
         method: "POST",
@@ -229,6 +259,15 @@ export default function HomePage() {
       if (!res.ok) throw new Error(data.detail || "Generation failed");
       setFiles(data.files);
       setAnalysis(data.analysis);
+      setEnvValues((prev) =>
+        options?.preserveEnvEdits
+          ? {
+              ...envValuesFromAnalysis(data.analysis),
+              ...prev,
+              ...(overrides?.envValues ?? {}),
+            }
+          : envValuesFromAnalysis(data.analysis),
+      );
       if (data.analysis?.port && overrides?.port) {
         setPortOverride(String(overrides.port));
       }
@@ -236,6 +275,7 @@ export default function HomePage() {
         overrides?.enabledServices ??
           data.analysis.services.map((s: { name: string }) => s.name),
       );
+      return data;
     },
     [],
   );
@@ -263,6 +303,8 @@ export default function HomePage() {
         if (!res.ok) throw new Error(data.detail || "Analysis failed");
         setTokenProvided(data.tokenProvided);
         setAnalysis(data.analysis);
+        setEnvValues(envValuesFromAnalysis(data.analysis));
+        setDatabaseMode("bundled");
         setEnabledServices(data.analysis.services.map((s: { name: string }) => s.name));
         await generateFiles(target, githubToken, {
           enabledServices: data.analysis.services.map((s: { name: string }) => s.name),
@@ -293,7 +335,9 @@ export default function HomePage() {
         baseImageVersion: baseImageVersion || undefined,
         extraEnv: Object.keys(envRecord).length ? envRecord : undefined,
         enabledServices,
-      });
+        databaseMode,
+        envValues: Object.keys(envValues).length ? envValues : undefined,
+      }, { preserveEnvEdits: true });
       toast.success("Files regenerated");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Regeneration failed");
@@ -307,6 +351,8 @@ export default function HomePage() {
     baseImageVersion,
     githubToken,
     enabledServices,
+    databaseMode,
+    envValues,
     generateFiles,
   ]);
 
@@ -325,18 +371,76 @@ export default function HomePage() {
             baseImageVersion: baseImageVersion || undefined,
             extraEnv: Object.keys(envRecord).length ? envRecord : undefined,
             enabledServices: next,
-          }).catch((err) => {
+            databaseMode,
+            envValues: Object.keys(envValues).length ? envValues : undefined,
+          }, { preserveEnvEdits: true }).catch((err) => {
             toast.error(err instanceof Error ? err.message : "Failed to update services");
           });
         }
         return next;
       });
     },
-    [analysis, extraEnv, portOverride, baseImageVersion, githubToken, generateFiles],
+    [analysis, extraEnv, portOverride, baseImageVersion, githubToken, enabledServices, databaseMode, envValues, generateFiles],
   );
 
+  const handleDatabaseModeChange = useCallback(
+    async (mode: DatabaseMode) => {
+      setDatabaseMode(mode);
+      if (!analysis) return;
+      const envRecord = Object.fromEntries(
+        extraEnv.filter((e) => e.key).map((e) => [e.key, e.value]),
+      );
+      try {
+        const data = await generateFiles(analysis.repoUrl, githubToken, {
+          port: portOverride ? Number(portOverride) : undefined,
+          baseImageVersion: baseImageVersion || undefined,
+          extraEnv: Object.keys(envRecord).length ? envRecord : undefined,
+          enabledServices,
+          databaseMode: mode,
+          envValues: Object.keys(envValues).length ? envValues : undefined,
+        });
+        if (data?.analysis) {
+          setEnvValues((prev) => {
+            const next = { ...prev };
+            for (const variable of data.analysis.envVars) {
+              if (variable.category === "database") {
+                next[variable.key] = variable.suggestedValue;
+              }
+            }
+            return next;
+          });
+        }
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : "Failed to update database mode");
+      }
+    },
+    [
+      analysis,
+      extraEnv,
+      portOverride,
+      baseImageVersion,
+      githubToken,
+      enabledServices,
+      envValues,
+      generateFiles,
+    ],
+  );
+
+  const handleEnvValueChange = useCallback((key: string, value: string) => {
+    setEnvValues((prev) => ({ ...prev, [key]: value }));
+  }, []);
+
   const hasCustomChanges =
-    Boolean(portOverride || baseImageVersion || extraEnv.some((e) => e.key));
+    Boolean(
+      portOverride ||
+        baseImageVersion ||
+        extraEnv.some((e) => e.key) ||
+        databaseMode !== "bundled" ||
+        (analysis &&
+          analysis.envVars.some(
+            (variable) => envValues[variable.key] !== variable.suggestedValue,
+          )),
+    );
 
   const downloadZip = async () => {
     if (!files) return;
@@ -783,6 +887,103 @@ export default function HomePage() {
                   </div>
                 )}
 
+                {analysis.envVars.length > 0 && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <Label>
+                        Environment Variables ({analysis.envVars.filter((v) => v.required).length} required)
+                      </Label>
+                      {analysis.services.some(
+                        (service) =>
+                          service.name === "postgres" ||
+                          service.name === "mysql" ||
+                          service.name === "mongodb",
+                      ) && (
+                        <div className="flex items-center gap-2 text-xs">
+                          <span className="text-muted-foreground">Database:</span>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={databaseMode === "bundled" ? "default" : "outline"}
+                            className={
+                              databaseMode === "bundled"
+                                ? "h-7 bg-emerald-500 hover:bg-emerald-600 text-emerald-950"
+                                : "h-7"
+                            }
+                            onClick={() => handleDatabaseModeChange("bundled")}
+                          >
+                            In Compose
+                          </Button>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant={databaseMode === "external" ? "default" : "outline"}
+                            className={
+                              databaseMode === "external"
+                                ? "h-7 bg-emerald-500 hover:bg-emerald-600 text-emerald-950"
+                                : "h-7"
+                            }
+                            onClick={() => handleDatabaseModeChange("external")}
+                          >
+                            External
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                    {databaseMode === "external" && (
+                      <p className="text-xs text-muted-foreground">
+                        Database services are excluded from docker-compose. Fill in your real database host, credentials, and connection strings below.
+                      </p>
+                    )}
+                    <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
+                      {analysis.envVars.map((variable) => (
+                        <div
+                          key={variable.key}
+                          className="rounded-lg border p-3 space-y-2"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <code className="text-xs font-semibold">{variable.key}</code>
+                            {variable.required && (
+                              <Badge variant="outline" className="text-[10px]">
+                                required
+                              </Badge>
+                            )}
+                            <Badge variant="secondary" className="text-[10px]">
+                              {variable.category}
+                            </Badge>
+                            <Badge variant="outline" className="text-[10px]">
+                              {ENV_SOURCE_LABELS[variable.source] ?? variable.source}
+                            </Badge>
+                          </div>
+                          <Input
+                            className="font-mono text-xs"
+                            type={variable.sensitive ? "password" : "text"}
+                            value={envValues[variable.key] ?? variable.suggestedValue}
+                            onChange={(e) =>
+                              handleEnvValueChange(variable.key, e.target.value)
+                            }
+                          />
+                          {variable.description && (
+                            <p className="text-xs text-muted-foreground">
+                              {variable.description}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                    <Button
+                      type="button"
+                      size="sm"
+                      className="bg-emerald-500 hover:bg-emerald-600 text-emerald-950"
+                      disabled={regenerating}
+                      onClick={handleRegenerate}
+                    >
+                      {regenerating ? <Loader2 className="size-4 animate-spin" /> : null}
+                      Apply environment values
+                    </Button>
+                  </div>
+                )}
+
                 {analysis.notes.length > 0 && (
                   <ul className="space-y-1 text-sm text-muted-foreground">
                     {analysis.notes.map((note) => (
@@ -895,6 +1096,8 @@ export default function HomePage() {
                             setPortOverride("");
                             setBaseImageVersion("");
                             setExtraEnv([]);
+                            if (analysis) setEnvValues(envValuesFromAnalysis(analysis));
+                            setDatabaseMode("bundled");
                           }}
                         >
                           Reset
