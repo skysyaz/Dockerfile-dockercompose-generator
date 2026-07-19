@@ -1,0 +1,15 @@
+.git
+.github
+.env
+.env.*
+!.env.example
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.venv
+**/node_modules
+frontend/dist
+backend/.venv
+*.md
+!README.md
+CLAUDE.md
