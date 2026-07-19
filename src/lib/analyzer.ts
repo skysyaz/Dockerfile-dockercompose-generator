@@ -926,6 +926,14 @@ function buildCmd(pm: string): string {
 
 }
 
+const GRADLE_BOOT_JAR_BUILD = `RUN gradle bootJar --no-daemon -x test || gradle jar --no-daemon -x test
+RUN set -e; \\
+    BOOT_JAR=$(find /app -type f -path '*/build/libs/*.jar' ! -name '*-plain.jar' -exec du -b {} + | sort -rn | head -1 | cut -f2-); \\
+    test -f "$BOOT_JAR"; \\
+    cp "$BOOT_JAR" /app/application.jar`;
+
+const GRADLE_BOOT_JAR_COPY = `COPY --from=builder /app/application.jar app.jar`;
+
 export function generateDockerfile(
   analysis: AnalysisResult,
   customizations: Customizations = {},
@@ -1021,10 +1029,10 @@ COPY gradle ./gradle
 COPY gradlew gradlew.bat ./
 RUN gradle dependencies --no-daemon || true
 COPY . .
-RUN gradle bootJar --no-daemon -x test || gradle jar --no-daemon -x test
+${GRADLE_BOOT_JAR_BUILD}
 FROM ${images.jre}
 WORKDIR /app
-COPY --from=builder /app/build/libs/*.jar app.jar
+${GRADLE_BOOT_JAR_COPY}
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["java", "-jar", "app.jar"]
 `;
@@ -1216,11 +1224,11 @@ COPY gradle ./gradle
 COPY gradlew gradlew.bat ./
 RUN gradle dependencies --no-daemon || true
 COPY . .
-RUN gradle bootJar --no-daemon -x test
+${GRADLE_BOOT_JAR_BUILD}
 
 FROM ${images.jre}
 WORKDIR /app
-COPY --from=builder /app/build/libs/*.jar app.jar
+${GRADLE_BOOT_JAR_COPY}
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["java", "-jar", "app.jar"]
 `;

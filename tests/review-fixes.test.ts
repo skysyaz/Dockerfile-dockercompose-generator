@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { auditExistingFiles } from "../src/lib/docker-audit.ts";
 import {
   classifyCloneError,
+  generateDockerfile,
   parseGithubUrl,
 } from "../src/lib/analyzer.ts";
 import { parseRepoUrl } from "../src/lib/repo-url.ts";
@@ -63,6 +64,24 @@ describe("validation", () => {
   it("rejects unsafe build filenames", () => {
     assert.equal(isAllowedBuildFile("Dockerfile"), true);
     assert.equal(isAllowedBuildFile("../Dockerfile"), false);
+  });
+});
+
+describe("generateDockerfile", () => {
+  it("resolves boot jars from multi-module Gradle projects", () => {
+    const analysis: AnalysisResult = {
+      ...baseAnalysis,
+      language: "java",
+      framework: "spring-boot",
+      packageManager: "gradle",
+      buildTool: "gradle",
+      entrypoint: "build.gradle",
+      port: 8080,
+    };
+    const dockerfile = generateDockerfile(analysis, {});
+    assert.match(dockerfile, /find \/app -type f -path '\*\/build\/libs\/\*\.jar'/);
+    assert.match(dockerfile, /COPY --from=builder \/app\/application\.jar app\.jar/);
+    assert.doesNotMatch(dockerfile, /COPY --from=builder \/app\/build\/libs\/\*\.jar/);
   });
 });
 
