@@ -34,11 +34,16 @@ export function parseRepoUrl(url: string): ParsedRepoUrl | null {
     };
   }
 
+  // Matches gitlab.com, subdomains of gitlab.com, and self-managed
+  // instances that follow the gitlab.<domain> naming convention.
   const gitlab = trimmed.match(
-    /^(?:https?:\/\/)?((?:[^/]+\.)?gitlab\.com)\/(.+)$/i,
+    /^(?:https?:\/\/)?((?:[^/]+\.)?gitlab\.com|gitlab\.[^/]+)\/(.+)$/i,
   );
   if (gitlab) {
-    const projectPath = gitlab[2].replace(/\.git$/, "");
+    const projectPath = gitlab[2]
+      .replace(/[#?].*$/, "")
+      .replace(/\/-\/.*$/, "")
+      .replace(/\.git$/, "");
     const segments = projectPath.split("/").filter(Boolean);
     if (segments.length < 2) return null;
     const repoName = segments[segments.length - 1]!;

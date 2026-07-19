@@ -799,6 +799,28 @@ function frameworkDatabaseVars(
     });
   }
 
+  if (services.some((s) => s.name === "rabbitmq")) {
+    vars.push({
+      key: "AMQP_URL",
+      suggestedValue: "amqp://app:app@rabbitmq:5672",
+      category: "config",
+      source: "dependency-inference",
+      required: false,
+      description: "RabbitMQ connection URL",
+    });
+  }
+
+  if (services.some((s) => s.name === "elasticsearch")) {
+    vars.push({
+      key: "ELASTICSEARCH_URL",
+      suggestedValue: "http://elasticsearch:9200",
+      category: "config",
+      source: "dependency-inference",
+      required: false,
+      description: "Elasticsearch endpoint",
+    });
+  }
+
   return vars;
 }
 
@@ -815,6 +837,11 @@ function frameworkDefaults(
     case "nodejs":
     case "express":
     case "nestjs":
+    case "remix":
+    case "astro":
+    case "fastify":
+    case "koa":
+    case "hono":
       push({
         key: "NODE_ENV",
         suggestedValue: "production",

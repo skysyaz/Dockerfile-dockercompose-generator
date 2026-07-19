@@ -144,9 +144,10 @@ function fixDockerCompose(
   }
 
   if (
-    ["nextjs", "django", "fastapi", "flask", "rails", "laravel", "nestjs", "express"].includes(
-      analysis.framework,
-    ) &&
+    [
+      "nextjs", "django", "fastapi", "flask", "rails", "laravel", "nestjs",
+      "express", "remix", "fastify", "koa", "hono", "sinatra", "symfony", "php",
+    ].includes(analysis.framework) &&
     !/^\s+app:[\s\S]*?env_file:/m.test(result)
   ) {
     fixes.push("docker-compose.yml: added env_file: .env to app service");

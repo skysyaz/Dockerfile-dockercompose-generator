@@ -581,7 +581,7 @@ export default function HomePage() {
           <section className="max-w-3xl mx-auto text-center mb-8">
             <Badge className="mb-4 bg-emerald-500/10 text-emerald-400 border-emerald-500/20 hover:bg-emerald-500/10">
               <Sparkles className="size-3 mr-1" />
-              Auto-detects 15+ frameworks · private repos · live build testing
+              Auto-detects 30+ frameworks · private repos · live build testing
             </Badge>
             <h1 className="text-4xl md:text-5xl font-bold tracking-tight mb-4">
               Dockerize any git repo{" "}
@@ -1216,13 +1216,13 @@ export default function HomePage() {
             {[
               {
                 icon: Boxes,
-                title: "20+ languages & frameworks",
-                text: "Next.js, Nuxt, Svelte, Express, NestJS, Django, Flask, FastAPI, Spring Boot, Rails, Laravel, Phoenix, Elixir, Scala, Kotlin, Go, Rust, .NET, Deno, Swift, Haskell, and more.",
+                title: "30+ languages & frameworks",
+                text: "Next.js, Nuxt, Svelte, Astro, Remix, Gatsby, React, Vue, Angular, Express, NestJS, Fastify, Django, Flask, FastAPI, Spring Boot, Rails, Sinatra, Laravel, Symfony, Phoenix, Scala, Kotlin, Clojure, Go, Rust, .NET, Deno, Dart, Swift, Haskell, C/C++, static sites, and more.",
               },
               {
                 icon: Server,
                 title: "Smart service detection",
-                text: "Auto-adds Postgres, MySQL, MongoDB, and Redis containers based on the dependencies in your package.json, requirements.txt, Gemfile, etc.",
+                text: "Auto-adds Postgres, MySQL, MongoDB, Redis, RabbitMQ, and Elasticsearch containers with healthchecks, based on the dependencies in your package.json, requirements.txt, Gemfile, etc.",
               },
               {
                 icon: Layers,

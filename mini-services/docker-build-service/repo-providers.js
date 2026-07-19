@@ -55,9 +55,12 @@ export function parseRepoUrl(url) {
     return { provider: "github", host: "github.com", projectPath: `${m[1]}/${repoName}`, repoName };
   }
 
-  m = trimmed.match(/^(?:https?:\/\/)?((?:[^/]+\.)?gitlab\.com)\/(.+)$/i);
+  m = trimmed.match(/^(?:https?:\/\/)?((?:[^/]+\.)?gitlab\.com|gitlab\.[^/]+)\/(.+)$/i);
   if (m) {
-    const projectPath = m[2].replace(/\.git$/, "");
+    const projectPath = m[2]
+      .replace(/[#?].*$/, "")
+      .replace(/\/-\/.*$/, "")
+      .replace(/\.git$/, "");
     const segments = projectPath.split("/").filter(Boolean);
     if (segments.length < 2) return null;
     return {
