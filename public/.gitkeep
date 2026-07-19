@@ -1,0 +1,1 @@
+# Keeps the public directory in git so Docker COPY succeeds.
