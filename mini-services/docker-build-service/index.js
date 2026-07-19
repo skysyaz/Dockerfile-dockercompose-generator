@@ -11,10 +11,16 @@ import { Server } from "socket.io";
 
 const PORT = Number(process.env.BUILD_SERVICE_PORT || 5173);
 const BUILD_TOKEN = process.env.BUILD_SERVICE_TOKEN || "";
+function normalizeOrigin(origin) {
+  return origin.replace(/\/$/, "");
+}
+
 const ALLOWED_ORIGINS = (process.env.BUILD_SERVICE_ORIGINS || "")
   .split(",")
-  .map((o) => o.trim())
+  .map((o) => normalizeOrigin(o.trim()))
   .filter(Boolean);
+
+const BUILD_SOCKET_PATH = "/build-socket";
 
 const ALLOWED_FILES = new Set([
   "Dockerfile",
@@ -93,9 +99,19 @@ function emitLog(socket, stream, text) {
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
-  path: "/",
+  path: BUILD_SOCKET_PATH,
   cors: {
-    origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : false,
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      const normalized = normalizeOrigin(origin);
+      if (
+        !ALLOWED_ORIGINS.length ||
+        ALLOWED_ORIGINS.some((allowed) => allowed === normalized)
+      ) {
+        return callback(null, true);
+      }
+      callback(new Error("Origin not allowed"));
+    },
     methods: ["GET", "POST"],
   },
 });

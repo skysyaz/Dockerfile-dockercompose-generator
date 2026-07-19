@@ -314,8 +314,11 @@ export default function HomePage() {
         return;
       }
 
-      const buildPort = process.env.NEXT_PUBLIC_BUILD_SERVICE_PORT || "5173";
-      const socket = ioClient(`/?XTransformPort=${buildPort}`, {
+      const buildSocketPath = "/build-socket";
+      const buildServiceUrl =
+        process.env.NEXT_PUBLIC_BUILD_SERVICE_URL || window.location.origin;
+      const socket = ioClient(buildServiceUrl, {
+        path: buildSocketPath,
         transports: ["websocket", "polling"],
         reconnection: false,
         timeout: 15000,
@@ -349,9 +352,9 @@ export default function HomePage() {
         },
       );
 
-      socket.on("connect_error", () => {
+      socket.on("connect_error", (err: Error) => {
         setBuildRunning(false);
-        setBuildDone({ success: false, reason: "connect-error" });
+        setBuildDone({ success: false, reason: err.message || "connect-error" });
       });
     } catch {
       setBuildRunning(false);

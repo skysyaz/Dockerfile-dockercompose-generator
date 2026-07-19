@@ -8,16 +8,15 @@ services:
         DOCKER_GID: ${DOCKER_GID:-999}
     container_name: dockgen
     ports:
-      - "${PORT:-5172}:${PORT:-5172}"           # Web UI
-      - "${BUILD_SERVICE_PORT:-5173}:${BUILD_SERVICE_PORT:-5173}"  # Test Build WebSocket
+      - "${PORT:-5172}:${PORT:-5172}"           # Web UI + proxied Test Build WebSocket
     restart: unless-stopped
     env_file:
       - .env
     environment:
       - NODE_ENV=production
       - PORT=${PORT:-5172}
+      - NEXT_INTERNAL_PORT=${NEXT_INTERNAL_PORT:-5174}
       - BUILD_SERVICE_PORT=${BUILD_SERVICE_PORT:-5173}
-      - NEXT_PUBLIC_BUILD_SERVICE_PORT=${BUILD_SERVICE_PORT:-5173}
       - BUILD_SERVICE_TOKEN=${BUILD_SERVICE_TOKEN:-}
       - BUILD_SERVICE_ORIGINS=${BUILD_SERVICE_ORIGINS:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}

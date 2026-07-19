@@ -19,8 +19,10 @@ RUN npm run build
 # ---------- Stage 3: mini-service deps ----------
 FROM node:20-alpine AS mini-deps
 WORKDIR /mini
-COPY mini-services/docker-build-service/package.json ./
-RUN npm install --omit=dev
+COPY mini-services/docker-build-service/package.json ./docker-build-service/
+RUN cd docker-build-service && npm install --omit=dev
+COPY mini-services/port-proxy/package.json ./port-proxy/
+RUN cd port-proxy && npm install --omit=dev
 
 # ---------- Stage 4: runner ----------
 FROM node:20-alpine AS runner
@@ -41,8 +43,10 @@ COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-COPY --from=mini-deps /mini/node_modules /mini-services/docker-build-service/node_modules
+COPY --from=mini-deps /mini/docker-build-service/node_modules /mini-services/docker-build-service/node_modules
 COPY --chown=nextjs:nodejs mini-services/docker-build-service /mini-services/docker-build-service
+COPY --from=mini-deps /mini/port-proxy/node_modules /mini-services/port-proxy/node_modules
+COPY mini-services/port-proxy/index.mjs /mini-services/port-proxy/index.mjs
 
 COPY --chown=nextjs:nodejs scripts/start.sh /app/start.sh
 RUN chmod +x /app/start.sh
@@ -50,8 +54,8 @@ RUN chmod +x /app/start.sh
 USER nextjs
 EXPOSE 5172 5173
 ENV PORT=5172
+ENV NEXT_INTERNAL_PORT=5174
 ENV BUILD_SERVICE_PORT=5173
-ENV NEXT_PUBLIC_BUILD_SERVICE_PORT=5173
 ENV BUILD_SERVICE_TOKEN=
 ENV BUILD_SERVICE_ORIGINS=
 ENV HOSTNAME=0.0.0.0
