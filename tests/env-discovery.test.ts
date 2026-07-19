@@ -133,6 +133,30 @@ describe("discoverEnvVars", () => {
     }
   });
 
+  it("skips system-provided variables found by the source scan", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-env-sys-"));
+    try {
+      await fs.mkdir(path.join(root, "src"), { recursive: true });
+      await fs.writeFile(
+        path.join(root, "src", "Program.cs"),
+        'var host = Environment.GetEnvironmentVariable("HOSTNAME");\n' +
+          'var pc = Environment.GetEnvironmentVariable("COMPUTERNAME");\n' +
+          'var mode = Environment.GetEnvironmentVariable("APP_MODE");\n',
+      );
+      const vars = await discoverEnvVars(root, {
+        framework: "dotnet",
+        services: [],
+        repoName: "app",
+        port: 8080,
+      });
+      assert.ok(!vars.some((variable) => variable.key === "HOSTNAME"));
+      assert.ok(!vars.some((variable) => variable.key === "COMPUTERNAME"));
+      assert.ok(vars.some((variable) => variable.key === "APP_MODE"));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("finds env references in source files", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-env-"));
     try {
@@ -252,6 +276,20 @@ describe("formatEnvValue", () => {
     assert.equal(formatEnvValue("simple"), "simple");
     assert.equal(formatEnvValue("has spaces"), '"has spaces"');
     assert.equal(formatEnvValue("line\nbreak"), null);
+  });
+
+  it("single-quotes values with $ so compose does not interpolate them", () => {
+    assert.equal(formatEnvValue("pa$$w0rd"), "'pa$$w0rd'");
+    assert.equal(
+      formatEnvValue(
+        "Data Source=10.20.10.10;Initial Catalog=HangFire;User ID=sa;Password=pa$$w0rd;",
+      ),
+      "'Data Source=10.20.10.10;Initial Catalog=HangFire;User ID=sa;Password=pa$$w0rd;'",
+    );
+  });
+
+  it("escapes $ as $$ when the value also contains single quotes", () => {
+    assert.equal(formatEnvValue("it's pa$$w0rd"), '"it\'s pa$$$$w0rd"');
   });
 });
 

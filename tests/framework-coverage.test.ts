@@ -256,6 +256,14 @@ describe("compose healthchecks", () => {
     assert.match(compose, /pg_isready -U app -d app/);
     assert.match(compose, /interval: 5s/);
   });
+
+  it("escapes $ in extra environment values so compose keeps them literal", () => {
+    const analysis: AnalysisResult = { ...base, framework: "express" };
+    const compose = generateDockerCompose(analysis, {
+      extraEnv: { DB_PASSWORD: "pa$$w0rd" },
+    });
+    assert.match(compose, /DB_PASSWORD: "pa\$\$\$\$w0rd"/);
+  });
 });
 
 describe("self-managed gitlab", () => {

@@ -2126,7 +2126,11 @@ export function generateDockerCompose(
   if (customizations.extraEnv && Object.keys(customizations.extraEnv).length) {
     yaml += `    environment:\n`;
     for (const [key, value] of Object.entries(customizations.extraEnv)) {
-      const safe = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      // compose interpolates $ in the compose file itself; $$ emits a literal $.
+      const safe = value
+        .replace(/\\/g, "\\\\")
+        .replace(/"/g, '\\"')
+        .replace(/\$/g, "$$$$");
       yaml += `      ${key}: "${safe}"\n`;
     }
   }

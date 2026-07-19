@@ -100,6 +100,26 @@ const ENV_SCAN_PATTERNS: RegExp[] = [
   /Sys\.getenv\(\s*["']([A-Z_][A-Z0-9_]*)["']/gi,
 ];
 
+// System-provided variables that source code reads but the container runtime
+// supplies. Emitting them as empty KEY= lines would override the real values.
+const SYSTEM_ENV_KEYS = new Set([
+  "HOSTNAME",
+  "COMPUTERNAME",
+  "PATH",
+  "HOME",
+  "USER",
+  "USERNAME",
+  "USERPROFILE",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "PWD",
+  "SHELL",
+  "LANG",
+  "OS",
+  "PROCESSOR_ARCHITECTURE",
+]);
+
 const SECRET_KEY_HINTS =
   /secret|password|passwd|token|api[_-]?key|private|credential|auth/i;
 const DATABASE_KEY_HINTS =
@@ -213,6 +233,17 @@ export function canonicalEnvKey(key: string): string | null {
 
 export function formatEnvValue(value: string): string | null {
   if (value.includes("\n") || value.includes("\r")) return null;
+  // docker compose interpolates $ in env_file values (unquoted AND
+  // double-quoted), so a password like pa$$w0rd would silently become
+  // pa$w0rd. Single-quoted values are passed through literally.
+  if (value.includes("$")) {
+    if (!value.includes("'")) return `'${value}'`;
+    // Contains both $ and ': double-quote and escape $ compose-style.
+    return `"${value
+      .replace(/\\/g, "\\\\")
+      .replace(/"/g, '\\"')
+      .replace(/\$/g, "$$$$")}"`;
+  }
   if (/[\s"'#\\]/.test(value)) {
     return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   }
@@ -1142,6 +1173,7 @@ export async function discoverEnvVars(
     for (const pattern of ENV_SCAN_PATTERNS) {
       pattern.lastIndex = 0;
       for (const match of content.matchAll(pattern)) {
+        if (SYSTEM_ENV_KEYS.has(match[1].toUpperCase())) continue;
         sourceKeys.add(match[1]);
       }
     }
