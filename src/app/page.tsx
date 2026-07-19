@@ -215,15 +215,19 @@ export default function HomePage() {
     [repoUrl, githubToken, generateFiles],
   );
 
-  const handleRegenerate = async () => {
+  const handleRegenerate = useCallback(async () => {
     if (!analysis) return;
     setRegenerating(true);
     try {
       const envRecord = Object.fromEntries(
         extraEnv.filter((e) => e.key).map((e) => [e.key, e.value]),
       );
+      const port = portOverride ? Number(portOverride) : undefined;
+      if (port !== undefined && (port < 1 || port > 65535)) {
+        throw new Error("Port must be between 1 and 65535");
+      }
       await generateFiles(analysis.repoUrl, githubToken, {
-        port: portOverride ? Number(portOverride) : undefined,
+        port,
         baseImageVersion: baseImageVersion || undefined,
         extraEnv: Object.keys(envRecord).length ? envRecord : undefined,
         enabledServices,
@@ -234,7 +238,40 @@ export default function HomePage() {
     } finally {
       setRegenerating(false);
     }
-  };
+  }, [
+    analysis,
+    extraEnv,
+    portOverride,
+    baseImageVersion,
+    githubToken,
+    enabledServices,
+    generateFiles,
+  ]);
+
+  const handleServiceToggle = useCallback(
+    (serviceName: string, checked: boolean) => {
+      setEnabledServices((prev) => {
+        const next = checked
+          ? [...prev, serviceName]
+          : prev.filter((n) => n !== serviceName);
+        if (analysis) {
+          const envRecord = Object.fromEntries(
+            extraEnv.filter((e) => e.key).map((e) => [e.key, e.value]),
+          );
+          generateFiles(analysis.repoUrl, githubToken, {
+            port: portOverride ? Number(portOverride) : undefined,
+            baseImageVersion: baseImageVersion || undefined,
+            extraEnv: Object.keys(envRecord).length ? envRecord : undefined,
+            enabledServices: next,
+          }).catch((err) => {
+            toast.error(err instanceof Error ? err.message : "Failed to update services");
+          });
+        }
+        return next;
+      });
+    },
+    [analysis, extraEnv, portOverride, baseImageVersion, githubToken, generateFiles],
+  );
 
   const hasCustomChanges =
     Boolean(portOverride || baseImageVersion || extraEnv.some((e) => e.key));
@@ -260,51 +297,66 @@ export default function HomePage() {
     setTimeout(() => setCopiedFile(null), 1500);
   };
 
-  const startBuild = () => {
+  const startBuild = async () => {
     if (!analysis || !files) return;
     setBuildOpen(true);
     setBuildLogs([]);
     setBuildRunning(true);
     setBuildDone(null);
 
-    const buildPort = process.env.NEXT_PUBLIC_BUILD_SERVICE_PORT || "5173";
-    const socket = ioClient(`/?XTransformPort=${buildPort}`, {
-      transports: ["websocket", "polling"],
-      reconnection: false,
-      timeout: 15000,
-      forceNew: true,
-    });
-    socketRef.current = socket;
-
-    socket.on("connect", () => {
-      const fileList = Object.entries(files)
-        .filter(([, content]) => content)
-        .map(([name, content]) => ({ name, content }));
-      socket.emit("build", {
-        repoUrl: analysis.repoUrl,
-        githubToken: githubToken || undefined,
-        files: fileList,
-        timeoutSec: 120,
-        cloneRepo: true,
-      });
-    });
-
-    socket.on("log", (line: BuildLogLine) => {
-      setBuildLogs((prev) => [...prev, line]);
-    });
-
-    socket.on(
-      "done",
-      (payload: { success: boolean; reason?: string; exitCode?: number | null }) => {
+    try {
+      const tokenRes = await fetch("/api/build-token");
+      const tokenData = await tokenRes.json();
+      if (!tokenRes.ok) {
         setBuildRunning(false);
-        setBuildDone(payload);
-      },
-    );
+        setBuildDone({ success: false, reason: "disabled" });
+        toast.error(tokenData.detail || "Test Build is disabled");
+        return;
+      }
 
-    socket.on("connect_error", () => {
+      const buildPort = process.env.NEXT_PUBLIC_BUILD_SERVICE_PORT || "5173";
+      const socket = ioClient(`/?XTransformPort=${buildPort}`, {
+        transports: ["websocket", "polling"],
+        reconnection: false,
+        timeout: 15000,
+        forceNew: true,
+        auth: { token: tokenData.token },
+      });
+      socketRef.current = socket;
+
+      socket.on("connect", () => {
+        const fileList = Object.entries(files)
+          .filter(([, content]) => content)
+          .map(([name, content]) => ({ name, content }));
+        socket.emit("build", {
+          repoUrl: analysis.repoUrl,
+          githubToken: githubToken || undefined,
+          files: fileList,
+          timeoutSec: 120,
+          cloneRepo: true,
+        });
+      });
+
+      socket.on("log", (line: BuildLogLine) => {
+        setBuildLogs((prev) => [...prev, line]);
+      });
+
+      socket.on(
+        "done",
+        (payload: { success: boolean; reason?: string; exitCode?: number | null }) => {
+          setBuildRunning(false);
+          setBuildDone(payload);
+        },
+      );
+
+      socket.on("connect_error", () => {
+        setBuildRunning(false);
+        setBuildDone({ success: false, reason: "connect-error" });
+      });
+    } catch {
       setBuildRunning(false);
       setBuildDone({ success: false, reason: "connect-error" });
-    });
+    }
   };
 
   const closeBuild = () => {
@@ -605,13 +657,9 @@ export default function HomePage() {
                         >
                           <Checkbox
                             checked={checked}
-                            onCheckedChange={(c) => {
-                              setEnabledServices((prev) =>
-                                c
-                                  ? [...prev, svc.name]
-                                  : prev.filter((n) => n !== svc.name),
-                              );
-                            }}
+                            onCheckedChange={(c) =>
+                              handleServiceToggle(svc.name, c === true)
+                            }
                           />
                           <div className="font-mono text-sm">{svc.name}</div>
                           <div className="font-mono text-xs text-muted-foreground truncate">

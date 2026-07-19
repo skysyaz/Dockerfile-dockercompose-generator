@@ -5,8 +5,18 @@ import {
   parseGithubUrl,
   redactSecrets,
 } from "@/lib/analyzer";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 export async function POST(request: NextRequest) {
+  const ip = getClientIp(request);
+  const limit = checkRateLimit(`analyze:${ip}`);
+  if (!limit.allowed) {
+    return NextResponse.json(
+      { detail: `Rate limit exceeded. Try again in ${limit.retryAfterSec} seconds.` },
+      { status: 429 },
+    );
+  }
+
   try {
     const body = (await request.json()) as {
       repoUrl?: string;

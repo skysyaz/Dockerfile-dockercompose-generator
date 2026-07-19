@@ -27,8 +27,12 @@ FROM node:20-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN apk add --no-cache docker-cli docker-cli-compose
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+ARG DOCKER_GID=999
+RUN apk add --no-cache docker-cli docker-cli-compose && \
+    addgroup -g 1001 -S nodejs && \
+    adduser -S nextjs -u 1001 -G nodejs && \
+    addgroup -g ${DOCKER_GID} -S docker && \
+    adduser nextjs docker
 
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
@@ -45,6 +49,8 @@ EXPOSE 5172 5173
 ENV PORT=5172
 ENV BUILD_SERVICE_PORT=5173
 ENV NEXT_PUBLIC_BUILD_SERVICE_PORT=5173
+ENV BUILD_SERVICE_TOKEN=
+ENV BUILD_SERVICE_ORIGINS=
 ENV HOSTNAME=0.0.0.0
 VOLUME ["/var/run/docker.sock"]
 CMD ["/app/start.sh"]

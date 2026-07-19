@@ -10,6 +10,27 @@ import * as tar from "tar";
 import { Server } from "socket.io";
 
 const PORT = Number(process.env.BUILD_SERVICE_PORT || 5173);
+const BUILD_TOKEN = process.env.BUILD_SERVICE_TOKEN || "";
+const ALLOWED_ORIGINS = (process.env.BUILD_SERVICE_ORIGINS || "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+const ALLOWED_FILES = new Set([
+  "Dockerfile",
+  "docker-compose.yml",
+  "docker-compose.yaml",
+  ".dockerignore",
+  ".env.example",
+  ".env",
+]);
+
+function redactSecrets(message) {
+  return String(message)
+    .replace(/ghp_[a-zA-Z0-9]+/g, "ghp_[REDACTED]")
+    .replace(/github_pat_[a-zA-Z0-9_]+/g, "github_pat_[REDACTED]")
+    .replace(/(https?:\/\/)[^@]+@/g, "$1");
+}
 
 function parseGithubUrl(url) {
   const m = url.match(/github\.com[/:]([^/]+)\/([^/#?]+)/);
@@ -17,6 +38,13 @@ function parseGithubUrl(url) {
   const repo = m[2].replace(/\.git$/, "").replace(/\/$/, "");
   if (!repo) return null;
   return { owner: m[1], repo };
+}
+
+function isAllowedFile(name) {
+  if (!name || name.includes("..") || name.includes("/") || name.includes("\\")) {
+    return false;
+  }
+  return ALLOWED_FILES.has(name);
 }
 
 async function fetchRepoTarball(repoUrl, dest, githubToken) {
@@ -42,43 +70,45 @@ async function fetchRepoTarball(repoUrl, dest, githubToken) {
     }
     await fs.mkdir(dest, { recursive: true });
     const nodeStream = Readable.fromWeb(res.body);
-    await pipeline(nodeStream, createGunzip(), tar.x({ cwd: dest, strip: 1 }));
+    await pipeline(
+      nodeStream,
+      createGunzip(),
+      tar.x({
+        cwd: dest,
+        strip: 1,
+        filter: (filePath) => {
+          const normalized = filePath.replace(/\\/g, "/");
+          return !normalized.startsWith("/") && !normalized.includes("..");
+        },
+      }),
+    );
   } finally {
     clearTimeout(timer);
   }
 }
 
-function emitLog(io, socket, stream, text) {
-  socket.emit("log", { t: Date.now(), stream, text });
-}
-
-function runCommand(cmd, args, cwd, timeoutSec) {
-  return new Promise((resolve) => {
-    const child = spawn(cmd, args, { cwd, shell: false });
-    let killed = false;
-    const timer = setTimeout(() => {
-      killed = true;
-      child.kill("SIGKILL");
-    }, timeoutSec * 1000);
-
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code: killed ? null : code, killed });
-    });
-
-    child.on("error", () => {
-      clearTimeout(timer);
-      resolve({ code: null, killed: false });
-    });
-
-    return child;
-  });
+function emitLog(socket, stream, text) {
+  socket.emit("log", { t: Date.now(), stream, text: redactSecrets(text) });
 }
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
   path: "/",
-  cors: { origin: "*" },
+  cors: {
+    origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : false,
+    methods: ["GET", "POST"],
+  },
+});
+
+io.use((socket, next) => {
+  if (!BUILD_TOKEN) {
+    return next(new Error("Build service is disabled (BUILD_SERVICE_TOKEN not set)"));
+  }
+  const token = socket.handshake.auth?.token;
+  if (token !== BUILD_TOKEN) {
+    return next(new Error("Unauthorized"));
+  }
+  next();
 });
 
 io.on("connection", (socket) => {
@@ -94,7 +124,7 @@ io.on("connection", (socket) => {
     const maxTimeout = Math.min(Math.max(timeoutSec, 30), 300);
     let workDir = "";
 
-    const log = (stream, text) => emitLog(io, socket, stream, text);
+    const log = (stream, text) => emitLog(socket, stream, text);
 
     try {
       const dockerCheck = spawn("docker", ["--version"]);
@@ -127,8 +157,12 @@ io.on("connection", (socket) => {
       }
 
       for (const file of files) {
+        if (!isAllowedFile(file.name)) {
+          log("stderr", `[write] rejected unsafe filename: ${file.name}`);
+          socket.emit("done", { success: false, reason: "invalid-file", exitCode: null });
+          return;
+        }
         const target = path.join(workDir, file.name);
-        await fs.mkdir(path.dirname(target), { recursive: true });
         await fs.writeFile(target, file.content, "utf-8");
         log("system", `[write] ${file.name} (${file.content.length} bytes)`);
       }

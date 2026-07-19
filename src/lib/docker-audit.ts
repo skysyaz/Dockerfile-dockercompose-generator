@@ -18,6 +18,11 @@ function getPort(analysis: AnalysisResult, customizations: Customizations): numb
   return customizations.port ?? analysis.port;
 }
 
+function isUsableDockerfile(content: string): boolean {
+  const trimmed = content.trim();
+  return trimmed.length > 20 && /^\s*FROM\s+/im.test(trimmed);
+}
+
 function fixDockerfile(
   content: string,
   analysis: AnalysisResult,
@@ -42,9 +47,9 @@ function fixDockerfile(
     }
   }
 
-  if (analysis.framework === "nextjs" && !/NODE_ENV/i.test(result)) {
+  if (analysis.framework === "nextjs" && !/NODE_ENV\s*=/i.test(result)) {
     fixes.push("Dockerfile: added NODE_ENV=production for Next.js");
-    result = result.replace(/(ENV\s+NODE_ENV=.*\n)?/i, "ENV NODE_ENV=production\n");
+    result = `ENV NODE_ENV=production\n${result}`;
   }
 
   if (
@@ -63,6 +68,37 @@ function fixDockerfile(
   return { content: result, fixes };
 }
 
+function fixAppServicePorts(content: string, port: number): { content: string; changed: boolean } {
+  const lines = content.split("\n");
+  let inApp = false;
+  let appIndent = -1;
+  let changed = false;
+
+  const updated = lines.map((line) => {
+    const indent = line.search(/\S/);
+
+    if (/^\s*app:\s*($|#)/.test(line)) {
+      inApp = true;
+      appIndent = indent;
+      return line;
+    }
+
+    if (inApp && indent >= 0 && indent <= appIndent && /^\s+\w[\w-]*:/.test(line)) {
+      inApp = false;
+    }
+
+    if (inApp && /^\s+-\s*["']?\d+:\d+["']?/.test(line)) {
+      const next = line.replace(/(\d+):(\d+)/, `${port}:${port}`);
+      if (next !== line) changed = true;
+      return next;
+    }
+
+    return line;
+  });
+
+  return { content: updated.join("\n"), changed };
+}
+
 function fixDockerCompose(
   content: string,
   analysis: AnalysisResult,
@@ -79,20 +115,24 @@ function fixDockerCompose(
       .join("\n")}`;
   }
 
+  if (!/^\s+app:[\s#]/m.test(result)) {
+    fixes.push("docker-compose.yml: ensured app service exists");
+    if (!/^\s+app:/m.test(result)) {
+      result = result.replace(/services:\s*\n/, `services:\n  app:\n    build: .\n`);
+    }
+  }
+
   if (!/restart:/i.test(result)) {
-    fixes.push("docker-compose.yml: added restart: unless-stopped");
+    fixes.push("docker-compose.yml: added restart: unless-stopped to app service");
     result = result.replace(/(^\s+app:\s*$)/m, "$1\n    restart: unless-stopped");
   }
 
-  const portPattern = /(["']?)(\d{2,5}):(\d{2,5})\1/g;
-  if (portPattern.test(result)) {
-    const updated = result.replace(portPattern, `"${port}:${port}"`);
-    if (updated !== result) {
-      fixes.push(`docker-compose.yml: normalized port mapping to ${port}:${port}`);
-      result = updated;
-    }
-  } else if (!/ports:/i.test(result)) {
-    fixes.push(`docker-compose.yml: added ports ${port}:${port}`);
+  const portFix = fixAppServicePorts(result, port);
+  if (portFix.changed) {
+    fixes.push(`docker-compose.yml: updated app port mapping to ${port}:${port}`);
+    result = portFix.content;
+  } else if (!/^\s+app:[\s\S]*?^\s+ports:/m.test(result)) {
+    fixes.push(`docker-compose.yml: added ports ${port}:${port} to app service`);
     result = result.replace(/(^\s+app:\s*$)/m, `$1\n    ports:\n      - "${port}:${port}"`);
   }
 
@@ -100,13 +140,10 @@ function fixDockerCompose(
     ["nextjs", "django", "fastapi", "flask", "rails", "laravel", "nestjs", "express"].includes(
       analysis.framework,
     ) &&
-    !/env_file:/i.test(result)
+    !/^\s+app:[\s\S]*?env_file:/m.test(result)
   ) {
-    fixes.push("docker-compose.yml: added env_file: .env");
-    result = result.replace(
-      /(^\s+app:\s*$)/m,
-      `$1\n    env_file:\n      - .env`,
-    );
+    fixes.push("docker-compose.yml: added env_file: .env to app service");
+    result = result.replace(/(^\s+app:\s*$)/m, `$1\n    env_file:\n      - .env`);
   }
 
   return { content: result, fixes };
@@ -127,14 +164,12 @@ function mergeEnvFile(
       .filter(Boolean),
   );
 
-  const missing = generated
-    .split("\n")
-    .filter((l) => {
-      const t = l.trim();
-      if (!t || t.startsWith("#")) return false;
-      const key = t.split("=")[0]?.trim();
-      return key && !existingKeys.has(key);
-    });
+  const missing = generated.split("\n").filter((l) => {
+    const t = l.trim();
+    if (!t || t.startsWith("#")) return false;
+    const key = t.split("=")[0]?.trim();
+    return key && !existingKeys.has(key);
+  });
 
   if (missing.length) {
     fixes.push(`${label}: added ${missing.length} missing environment variable(s)`);
@@ -173,29 +208,42 @@ export function auditExistingFiles(
   const files: Record<string, string> = { ...generated };
   const fixes: string[] = [];
 
-  if (existing.Dockerfile) {
-    const audited = fixDockerfile(existing.Dockerfile, analysis, port);
+  if (existing.Dockerfile !== undefined) {
+    const source = isUsableDockerfile(existing.Dockerfile)
+      ? existing.Dockerfile
+      : generated.Dockerfile;
+    if (!isUsableDockerfile(existing.Dockerfile)) {
+      fixes.push("Dockerfile: existing file was incomplete — merged with generated template");
+    }
+    const audited = fixDockerfile(source, analysis, port);
     files.Dockerfile = audited.content;
     fixes.push(...audited.fixes);
   }
 
   const composeExisting =
     existing["docker-compose.yml"] ?? existing["docker-compose.yaml"];
-  if (composeExisting) {
-    const audited = fixDockerCompose(composeExisting, analysis, port);
+  if (composeExisting !== undefined) {
+    const source =
+      composeExisting.includes("services:") && composeExisting.length > 30
+        ? composeExisting
+        : generated["docker-compose.yml"];
+    if (source === generated["docker-compose.yml"] && composeExisting) {
+      fixes.push("docker-compose.yml: existing file was incomplete — merged with generated template");
+    }
+    const audited = fixDockerCompose(source, analysis, port);
     files["docker-compose.yml"] = audited.content;
     fixes.push(...audited.fixes);
   }
 
-  if (existing[".dockerignore"]) {
-    const audited = fixDockerignore(existing[".dockerignore"]);
+  if (existing[".dockerignore"] !== undefined) {
+    const audited = fixDockerignore(existing[".dockerignore"] || generated[".dockerignore"]);
     files[".dockerignore"] = audited.content;
     fixes.push(...audited.fixes);
   }
 
-  if (existing[".env.example"] && generated[".env.example"]) {
+  if (existing[".env.example"] !== undefined && generated[".env.example"]) {
     const audited = mergeEnvFile(
-      existing[".env.example"],
+      existing[".env.example"] || generated[".env.example"],
       generated[".env.example"],
       ".env.example",
     );
@@ -203,8 +251,12 @@ export function auditExistingFiles(
     fixes.push(...audited.fixes);
   }
 
-  if (existing[".env"] && generated[".env"]) {
-    const audited = mergeEnvFile(existing[".env"], generated[".env"], ".env");
+  if (existing[".env"] !== undefined && generated[".env"]) {
+    const audited = mergeEnvFile(
+      existing[".env"] || generated[".env"],
+      generated[".env"],
+      ".env",
+    );
     files[".env"] = audited.content;
     fixes.push(...audited.fixes);
   }

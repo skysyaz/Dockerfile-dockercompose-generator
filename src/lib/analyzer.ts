@@ -65,8 +65,35 @@ interface CacheEntry {
 const cloneCache = new Map<string, CacheEntry>();
 
 function cacheKey(repoUrl: string, token?: string): string {
-  return `${repoUrl}::${token ?? ""}`;
+  return `${normalizeRepoUrl(repoUrl)}::${token ?? ""}`;
 }
+
+const MAX_CACHE_ENTRIES = 10;
+
+function evictOldestCacheEntry(): void {
+  if (cloneCache.size < MAX_CACHE_ENTRIES) return;
+  let oldestKey: string | null = null;
+  let oldestExpiry = Infinity;
+  for (const [key, entry] of cloneCache.entries()) {
+    if (entry.expiresAt < oldestExpiry) {
+      oldestExpiry = entry.expiresAt;
+      oldestKey = key;
+    }
+  }
+  if (oldestKey) {
+    const entry = cloneCache.get(oldestKey);
+    if (entry) {
+      fs.rm(entry.dir, { recursive: true, force: true }).catch(() => {});
+    }
+    cloneCache.delete(oldestKey);
+  }
+}
+
+function normalizeRepoUrl(url: string): string {
+  return url.trim().replace(/\.git$/, "").replace(/\/$/, "");
+}
+
+export { normalizeRepoUrl };
 
 export function parseGithubUrl(url: string): { owner: string; repo: string } | null {
   const m = url.match(/github\.com[/:]([^/]+)\/([^/#?]+)/);
@@ -167,7 +194,18 @@ export async function cloneRepo(
     }
     await fs.mkdir(dest, { recursive: true });
     const nodeStream = Readable.fromWeb(res.body as never);
-    await pipeline(nodeStream, createGunzip(), tar.x({ cwd: dest, strip: 1 }));
+    await pipeline(
+      nodeStream,
+      createGunzip(),
+      tar.x({
+        cwd: dest,
+        strip: 1,
+        filter: (filePath) => {
+          const normalized = filePath.replace(/\\/g, "/");
+          return !normalized.startsWith("/") && !normalized.includes("..");
+        },
+      }),
+    );
   } finally {
     clearTimeout(timer);
   }
@@ -201,9 +239,9 @@ async function readExistingDockerFiles(workDir: string): Promise<ExistingDockerF
   ] as const;
   const found: ExistingDockerFiles = {};
   for (const name of candidates) {
-    const content = await readText(path.join(workDir, name));
-    if (content) {
-      found[name] = content;
+    const filePath = path.join(workDir, name);
+    if (await fileExists(filePath)) {
+      found[name] = await readText(filePath);
     }
   }
   return found;
@@ -1198,6 +1236,135 @@ COPY . .
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["npm", "start"]
 `;
+    case "nuxt":
+      return `# Stage 1: Dependencies
+FROM ${images.node} AS deps
+WORKDIR /app
+COPY package*.json pnpm-lock.yaml yarn.lock bun.lock* ./
+${installCmd(analysis.packageManager)}
+
+# Stage 2: Build
+FROM ${images.node} AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+${buildCmd(analysis.packageManager)}
+
+# Stage 3: Runner
+FROM ${images.node} AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup -g 1001 -S nodejs && adduser -S nuxtjs -u 1001
+COPY --from=builder /app/.output ./.output
+USER nuxtjs
+EXPOSE ${customizations.port ?? analysis.port}
+ENV PORT=${customizations.port ?? analysis.port}
+ENV HOST=0.0.0.0
+CMD ["node", ".output/server/index.mjs"]
+`;
+    case "svelte":
+      return `FROM ${images.node} AS builder
+WORKDIR /app
+COPY package*.json pnpm-lock.yaml yarn.lock bun.lock* ./
+${installCmd(analysis.packageManager)}
+COPY . .
+${buildCmd(analysis.packageManager)}
+
+FROM ${images.node} AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/build ./build
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["npm", "start"]
+`;
+    case "phoenix":
+    case "elixir":
+      return `FROM elixir:1.16-alpine AS builder
+WORKDIR /app
+RUN apk add --no-cache build-base git
+COPY mix.exs mix.lock ./
+RUN mix local.hex --force && mix local.rebar --force
+RUN mix deps.get --only prod
+COPY . .
+RUN MIX_ENV=prod mix compile && mix release
+
+FROM alpine:latest
+WORKDIR /app
+RUN apk add --no-cache openssl ncurses-libs libstdc++
+COPY --from=builder /app/_build/prod/rel/*/ ./
+EXPOSE ${customizations.port ?? analysis.port}
+ENV PORT=${customizations.port ?? analysis.port}
+CMD ["bin/server", "start"]
+`;
+    case "scala":
+      return `FROM eclipse-temurin:17-jdk-alpine AS builder
+WORKDIR /app
+COPY build.sbt ./
+COPY project ./project
+RUN sbt update
+COPY . .
+RUN sbt stage
+
+FROM eclipse-temurin:17-jre-alpine
+WORKDIR /app
+COPY --from=builder /app/target/universal/stage ./
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["bin/main"]
+`;
+    case "kotlin":
+      return `FROM ${images.gradle} AS builder
+WORKDIR /app
+COPY build.gradle.kts settings.gradle.kts gradle.properties* ./
+COPY gradle ./gradle
+COPY gradlew gradlew.bat ./
+RUN gradle dependencies --no-daemon || true
+COPY . .
+RUN gradle bootJar --no-daemon -x test
+
+FROM ${images.jre}
+WORKDIR /app
+COPY --from=builder /app/build/libs/*.jar app.jar
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["java", "-jar", "app.jar"]
+`;
+    case "deno":
+      return `FROM denoland/deno:alpine
+WORKDIR /app
+COPY deno.json deno.jsonc* ./
+COPY . .
+RUN deno cache main.ts || true
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["deno", "run", "--allow-net", "--allow-read", "main.ts"]
+`;
+    case "swift":
+      return `FROM swift:5.10-jammy AS builder
+WORKDIR /app
+COPY Package.swift Package.resolved* ./
+COPY Sources ./Sources
+RUN swift build -c release
+
+FROM ubuntu:22.04
+WORKDIR /app
+COPY --from=builder /app/.build/release/* /app/server
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["./server"]
+`;
+    case "haskell":
+      return `FROM haskell:9.6 AS builder
+WORKDIR /app
+COPY stack.yaml package.yaml ./
+RUN stack update && stack build --dependencies-only || true
+COPY . .
+RUN stack install --local-bin-path /app/bin
+
+FROM debian:bookworm-slim
+WORKDIR /app
+COPY --from=builder /app/bin/* /app/server
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["./server"]
+`;
     default:
       return `FROM alpine:latest
 WORKDIR /app
@@ -1210,6 +1377,8 @@ CMD ["./start.sh"]
 
 const ENV_FRAMEWORKS = new Set([
   "nextjs",
+  "nuxt",
+  "svelte",
   "express",
   "nestjs",
   "nodejs",
@@ -1219,8 +1388,11 @@ const ENV_FRAMEWORKS = new Set([
   "python",
   "rails",
   "laravel",
+  "phoenix",
+  "elixir",
   "spring-boot",
   "dotnet",
+  "deno",
 ]);
 
 export function generateDockerCompose(
@@ -1246,7 +1418,8 @@ export function generateDockerCompose(
   if (customizations.extraEnv && Object.keys(customizations.extraEnv).length) {
     yaml += `    environment:\n`;
     for (const [key, value] of Object.entries(customizations.extraEnv)) {
-      yaml += `      ${key}: "${value}"\n`;
+      const safe = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      yaml += `      ${key}: "${safe}"\n`;
     }
   }
 
@@ -1344,6 +1517,7 @@ Cargo.lock
 function envSections(
   analysis: AnalysisResult,
   enabledServices: DetectedService[],
+  port: number,
   extraEnv?: Record<string, string>,
   withComments = true,
 ): string {
@@ -1394,7 +1568,7 @@ function envSections(
     case "nestjs":
       push("# Node.js");
       push("NODE_ENV=production");
-      push(`PORT=${analysis.port}`);
+      push(`PORT=${port}`);
       push("");
       break;
     case "django":
@@ -1408,7 +1582,7 @@ function envSections(
     case "fastapi":
       push("# Python app");
       push("APP_ENV=production");
-      push(`PORT=${analysis.port}`);
+      push(`PORT=${port}`);
       push("");
       break;
     case "rails":
@@ -1430,13 +1604,13 @@ function envSections(
     case "spring-boot":
       push("# Spring Boot");
       push("SPRING_PROFILES_ACTIVE=production");
-      push(`SERVER_PORT=${analysis.port}`);
+      push(`SERVER_PORT=${port}`);
       push("");
       break;
     case "dotnet":
       push("# .NET");
       push("ASPNETCORE_ENVIRONMENT=Production");
-      push(`ASPNETCORE_URLS=http://+:${analysis.port}`);
+      push(`ASPNETCORE_URLS=http://+:${port}`);
       push("");
       break;
   }
@@ -1459,6 +1633,7 @@ export function generateEnvExample(
   if (!ENV_FRAMEWORKS.has(analysis.framework) && !analysis.services.length) {
     return null;
   }
+  const port = customizations.port ?? analysis.port;
   const enabled = new Set(
     customizations.enabledServices ??
       analysis.services.map((s) => s.name),
@@ -1466,7 +1641,7 @@ export function generateEnvExample(
   const activeServices = analysis.services.filter((s) =>
     enabled.has(s.name),
   );
-  return envSections(analysis, activeServices, customizations.extraEnv, true);
+  return envSections(analysis, activeServices, port, customizations.extraEnv, true);
 }
 
 export function generateEnv(
@@ -1475,6 +1650,7 @@ export function generateEnv(
 ): string | null {
   const example = generateEnvExample(analysis, customizations);
   if (!example) return null;
+  const port = customizations.port ?? analysis.port;
   return envSections(
     analysis,
     analysis.services.filter((s) =>
@@ -1482,6 +1658,7 @@ export function generateEnv(
         s.name,
       ),
     ),
+    port,
     customizations.extraEnv,
     false,
   );
@@ -1529,6 +1706,7 @@ export async function cloneAndAnalyze(
   try {
     await cloneRepo(repoUrl, tempDir, githubToken);
     const analysis = await analyzeDirectory(repoUrl, tempDir);
+    evictOldestCacheEntry();
     cloneCache.set(key, {
       dir: tempDir,
       analysis,

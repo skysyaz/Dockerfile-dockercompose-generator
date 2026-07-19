@@ -7,9 +7,24 @@ import {
   parseGithubUrl,
   redactSecrets,
 } from "@/lib/analyzer";
+import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import type { Customizations } from "@/lib/types";
+import {
+  sanitizeBaseImageVersion,
+  sanitizeExtraEnv,
+  sanitizePort,
+} from "@/lib/validation";
 
 export async function POST(request: NextRequest) {
+  const ip = getClientIp(request);
+  const limit = checkRateLimit(`generate:${ip}`);
+  if (!limit.allowed) {
+    return NextResponse.json(
+      { detail: `Rate limit exceeded. Try again in ${limit.retryAfterSec} seconds.` },
+      { status: 429 },
+    );
+  }
+
   try {
     const body = (await request.json()) as {
       repoUrl?: string;
@@ -30,9 +45,9 @@ export async function POST(request: NextRequest) {
 
     const token = body.githubToken?.trim() || process.env.GITHUB_TOKEN || undefined;
     const customizations: Customizations = {
-      port: body.port,
-      baseImageVersion: body.baseImageVersion,
-      extraEnv: body.extraEnv,
+      port: sanitizePort(body.port),
+      baseImageVersion: sanitizeBaseImageVersion(body.baseImageVersion),
+      extraEnv: sanitizeExtraEnv(body.extraEnv),
       enabledServices: body.enabledServices,
     };
 
@@ -51,11 +66,16 @@ export async function POST(request: NextRequest) {
       cloneDir ?? undefined,
     );
 
+    const effectivePort = customizations.port ?? analysis.port;
+    const newNotes = auditFixes.filter(
+      (fix) => !analysis.notes.some((note) => note.includes(fix)),
+    );
+
     const enrichedAnalysis = {
       ...analysis,
-      port: customizations.port ?? analysis.port,
+      port: effectivePort,
       auditFixes,
-      notes: [...analysis.notes, ...auditFixes.filter((f) => !analysis.notes.includes(f))],
+      notes: newNotes.length ? [...analysis.notes, ...newNotes] : analysis.notes,
     };
 
     return NextResponse.json({
