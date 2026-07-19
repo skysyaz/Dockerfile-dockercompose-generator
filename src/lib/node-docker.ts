@@ -14,13 +14,24 @@ export function dependencyCopyLine(rootFiles: string[]): string {
   return `COPY ${copies.join(" ")} ./`;
 }
 
+const DEP_COPY_SOURCE = /^(?:\.\/)?(package\.json|package\*\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock|bun\.lockb)$/i;
+
+/**
+ * True only for COPY lines we can faithfully reconstruct: every source is a
+ * root-level dependency manifest/lockfile and the destination is the build
+ * root. Lines with subdirectory paths, extra files (pnpm-workspace.yaml,
+ * .npmrc, ...), or flags like --chown are left untouched so monorepo
+ * Dockerfiles don't lose sources in the rewrite.
+ */
 export function isDependencyCopyLine(line: string): boolean {
   const trimmed = line.trim();
   if (!/^COPY\s+/i.test(trimmed)) return false;
-  if (!/\s+\.(\/)?\s*$/.test(trimmed)) return false;
-  return /package(\*\.json|\.json|-lock\.json)|pnpm-lock\.yaml|yarn\.lock|bun\.lock/i.test(
-    trimmed,
-  );
+  const tokens = trimmed.split(/\s+/).slice(1);
+  if (tokens.length < 2) return false;
+  if (tokens.some((token) => token.startsWith("--"))) return false;
+  const dest = tokens[tokens.length - 1];
+  if (!/^\.\/?$/.test(dest)) return false;
+  return tokens.slice(0, -1).every((src) => DEP_COPY_SOURCE.test(src));
 }
 
 export function sanitizeDockerfileLockfiles(

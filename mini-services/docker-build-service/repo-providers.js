@@ -55,9 +55,12 @@ export function parseRepoUrl(url) {
     return { provider: "github", host: "github.com", projectPath: `${m[1]}/${repoName}`, repoName };
   }
 
-  m = trimmed.match(/^(?:https?:\/\/)?((?:[^/]+\.)?gitlab\.com)\/(.+)$/i);
+  m = trimmed.match(/^(?:https?:\/\/)?((?:[^/]+\.)?gitlab\.com|gitlab\.[^/]+)\/(.+)$/i);
   if (m) {
-    const projectPath = m[2].replace(/\.git$/, "");
+    const projectPath = m[2]
+      .replace(/[#?].*$/, "")
+      .replace(/\/-\/.*$/, "")
+      .replace(/\.git$/, "");
     const segments = projectPath.split("/").filter(Boolean);
     if (segments.length < 2) return null;
     return {
@@ -115,20 +118,19 @@ export function parseRepoUrl(url) {
 export function resolveAccessToken(provider, requestToken) {
   const token = typeof requestToken === "string" ? requestToken.trim() : "";
   if (token) return token;
+  // Never fall back to another provider's token: it would not authenticate
+  // and would leak the credential to a foreign (possibly self-hosted) API.
   switch (provider) {
     case "github":
       return process.env.GITHUB_TOKEN || undefined;
     case "gitlab":
-      return process.env.GITLAB_TOKEN || process.env.GITHUB_TOKEN || undefined;
+      return process.env.GITLAB_TOKEN || undefined;
     case "bitbucket":
       return process.env.BITBUCKET_TOKEN || undefined;
+    case "codeberg":
+    case "gitea":
     default:
-      return (
-        process.env.GITHUB_TOKEN ||
-        process.env.GITLAB_TOKEN ||
-        process.env.GITEA_TOKEN ||
-        undefined
-      );
+      return process.env.GITEA_TOKEN || undefined;
   }
 }
 

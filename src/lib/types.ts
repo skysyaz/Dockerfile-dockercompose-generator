@@ -14,6 +14,9 @@ export type Language =
   | "swift"
   | "haskell"
   | "cpp"
+  | "dart"
+  | "clojure"
+  | "html"
   | "unknown";
 
 export type Framework =
@@ -50,14 +53,26 @@ export type Framework =
   | "swift"
   | "haskell"
   | "deno"
+  | "astro"
+  | "remix"
+  | "gatsby"
+  | "fastify"
+  | "koa"
+  | "hono"
+  | "dart"
+  | "clojure"
+  | "cmake"
+  | "static"
   | "unknown";
 
 export interface DetectedService {
-  name: "postgres" | "mysql" | "redis" | "mongodb";
+  name: "postgres" | "mysql" | "redis" | "mongodb" | "rabbitmq" | "elasticsearch";
   image: string;
   env?: Record<string, string>;
   ports?: string[];
   volumes?: string[];
+  /** Shell command for a compose healthcheck (emitted as CMD-SHELL). */
+  healthcheck?: string;
 }
 
 export type RepoProvider = "github" | "gitlab" | "bitbucket" | "codeberg" | "gitea";
@@ -113,6 +128,14 @@ export interface AnalysisResult {
   rootFiles: string[];
   existingFiles: string[];
   auditFixes?: string[];
+  /** Python dependency manager detected from lockfiles (pip/poetry/uv/pipenv/pdm). */
+  pythonManager?: "pip" | "poetry" | "uv" | "pipenv" | "pdm";
+  /** WSGI/ASGI app module, e.g. "config.wsgi:application" or "app.main:app". */
+  wsgiModule?: string;
+  /** Go main-package path relative to the build context, e.g. "./cmd/server". */
+  goBuildPath?: string;
+  /** Compiled binary name (Rust crate / [[bin]] target). */
+  binaryName?: string;
 }
 
 export interface Customizations {

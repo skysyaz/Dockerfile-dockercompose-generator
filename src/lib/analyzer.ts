@@ -59,6 +59,9 @@ const BACKEND_MARKERS = [
   "deno.json",
   "deno.jsonc",
   "CMakeLists.txt",
+  "pubspec.yaml",
+  "project.clj",
+  "deps.edn",
   "*.csproj",
   "*.sln",
 ];
@@ -438,9 +441,15 @@ function detectPackageManager(files: string[], packageManagerField = ""): string
   if (files.includes("yarn.lock")) return "yarn";
   if (files.includes("bun.lock") || files.includes("bun.lockb")) return "bun";
   if (files.includes("package-lock.json")) return "npm";
+  if (files.includes("uv.lock")) return "uv";
+  if (files.includes("poetry.lock")) return "poetry";
+  if (files.includes("pdm.lock")) return "pdm";
   if (files.includes("Pipfile")) return "pipenv";
   if (files.includes("pyproject.toml")) return "pip";
   if (files.includes("requirements.txt")) return "pip";
+  if (files.includes("pubspec.yaml") || files.includes("pubspec.yml")) return "pub";
+  if (files.includes("project.clj")) return "lein";
+  if (files.includes("deps.edn")) return "clojure-cli";
   if (files.includes("pom.xml")) return "maven";
   if (files.includes("build.gradle") || files.includes("build.gradle.kts"))
     return "gradle";
@@ -463,6 +472,108 @@ function detectPackageManager(files: string[], packageManagerField = ""): string
 async function listRootFiles(dir: string): Promise<string[]> {
   const entries = await fs.readdir(dir, { withFileTypes: true });
   return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+}
+
+async function detectPythonManager(
+  workDir: string,
+  rootFiles: string[],
+): Promise<AnalysisResult["pythonManager"]> {
+  if (rootFiles.includes("uv.lock")) return "uv";
+  if (rootFiles.includes("poetry.lock")) return "poetry";
+  if (rootFiles.includes("pdm.lock")) return "pdm";
+  if (rootFiles.includes("Pipfile")) return "pipenv";
+  if (rootFiles.includes("pyproject.toml")) {
+    const pyproject = await readText(path.join(workDir, "pyproject.toml"));
+    if (/\[tool\.poetry\]/.test(pyproject)) return "poetry";
+    if (/\[tool\.pdm\]/.test(pyproject)) return "pdm";
+    if (/\[tool\.uv\]/.test(pyproject)) return "uv";
+  }
+  return "pip";
+}
+
+async function detectPythonAppModule(
+  workDir: string,
+  framework: Framework,
+): Promise<string> {
+  if (framework === "django") {
+    const pyFiles = await globFiles(workDir, "*.py", 0, 3);
+    const wsgi = pyFiles
+      .filter((f) => {
+        const base = path.basename(f);
+        return base === "wsgi.py" || base === "asgi.py";
+      })
+      .map((f) => toPosixRelative(workDir, f))
+      .sort(
+        (a, b) =>
+          a.split("/").length - b.split("/").length ||
+          // Prefer wsgi.py over asgi.py at the same depth.
+          (a.endsWith("wsgi.py") ? -1 : 1) - (b.endsWith("wsgi.py") ? -1 : 1),
+      )[0];
+    if (wsgi) {
+      const mod = wsgi.replace(/\.py$/, "").split("/").join(".");
+      return `${mod}:application`;
+    }
+    return "";
+  }
+
+  if (framework === "fastapi" || framework === "flask") {
+    const marker =
+      framework === "fastapi"
+        ? /(\w+)\s*=\s*FastAPI\s*\(/
+        : /(\w+)\s*=\s*Flask\s*\(/;
+    const candidates = [
+      "main.py",
+      "app.py",
+      "application.py",
+      "server.py",
+      "wsgi.py",
+      "app/main.py",
+      "app/app.py",
+      "src/main.py",
+      "src/app.py",
+      "api/main.py",
+    ];
+    for (const rel of candidates) {
+      const content = await readText(path.join(workDir, rel));
+      if (!content) continue;
+      const match = content.match(marker);
+      if (match) {
+        const mod = rel.replace(/\.py$/, "").split("/").join(".");
+        return `${mod}:${match[1]}`;
+      }
+    }
+  }
+
+  return "";
+}
+
+async function detectGoBuildPath(
+  workDir: string,
+  rootFiles: string[],
+  repoName: string,
+): Promise<string> {
+  if (rootFiles.includes("main.go")) return ".";
+  const goFiles = await globFiles(workDir, "*.go", 0, 3);
+  const mainDirs = goFiles
+    .filter((f) => path.basename(f) === "main.go")
+    .map((f) => toPosixRelative(workDir, path.dirname(f)));
+  if (!mainDirs.length) return "";
+  const repoLower = repoName.toLowerCase();
+  const preferred =
+    mainDirs.find((d) => new RegExp(`^cmd/${repoLower}$`, "i").test(d)) ??
+    mainDirs.find((d) => /^cmd\/(server|api|app|web|main)$/i.test(d)) ??
+    mainDirs.find((d) => d.startsWith("cmd/")) ??
+    mainDirs.sort((a, b) => a.split("/").length - b.split("/").length)[0];
+  return preferred ? `./${preferred}` : "";
+}
+
+async function detectRustBinaryName(workDir: string): Promise<string> {
+  const cargo = await readText(path.join(workDir, "Cargo.toml"));
+  if (!cargo) return "";
+  const bin = cargo.match(/\[\[bin\]\][^[]*?name\s*=\s*"([^"]+)"/);
+  if (bin) return bin[1];
+  const pkg = cargo.match(/\[package\][^[]*?name\s*=\s*"([^"]+)"/);
+  return pkg?.[1] ?? "";
 }
 
 async function refreshAnalysisRootFiles(
@@ -565,6 +676,7 @@ function detectServices(deps: string[]): DetectedService[] {
       },
       ports: ["5432:5432"],
       volumes: ["postgres_data:/var/lib/postgresql/data"],
+      healthcheck: "pg_isready -U app -d app",
     });
   }
 
@@ -584,6 +696,7 @@ function detectServices(deps: string[]): DetectedService[] {
       },
       ports: ["3306:3306"],
       volumes: ["mysql_data:/var/lib/mysql"],
+      healthcheck: "mysqladmin ping -h 127.0.0.1 -uroot -proot",
     });
   }
 
@@ -599,6 +712,7 @@ function detectServices(deps: string[]): DetectedService[] {
       },
       ports: ["27017:27017"],
       volumes: ["mongo_data:/data/db"],
+      healthcheck: "mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'",
     });
   }
 
@@ -610,6 +724,40 @@ function detectServices(deps: string[]): DetectedService[] {
       image: "redis:7-alpine",
       ports: ["6379:6379"],
       volumes: ["redis_data:/data"],
+      healthcheck: "redis-cli ping",
+    });
+  }
+
+  if (
+    /\bamqplib\b|\bpika\b|\bbunny\b|php-amqplib|masstransit|rabbitmq|spring-boot-starter-amqp/.test(
+      joined,
+    )
+  ) {
+    services.push({
+      name: "rabbitmq",
+      image: "rabbitmq:3-management-alpine",
+      env: {
+        RABBITMQ_DEFAULT_USER: "app",
+        RABBITMQ_DEFAULT_PASS: "app",
+      },
+      ports: ["5672:5672", "15672:15672"],
+      volumes: ["rabbitmq_data:/var/lib/rabbitmq"],
+      healthcheck: "rabbitmq-diagnostics -q ping",
+    });
+  }
+
+  if (/\belasticsearch\b|@elastic\/elasticsearch|elasticsearch-py|\bopensearch\b/.test(joined)) {
+    services.push({
+      name: "elasticsearch",
+      image: "docker.elastic.co/elasticsearch/elasticsearch:8.13.4",
+      env: {
+        "discovery.type": "single-node",
+        "xpack.security.enabled": "false",
+        ES_JAVA_OPTS: "-Xms512m -Xmx512m",
+      },
+      ports: ["9200:9200"],
+      volumes: ["elasticsearch_data:/usr/share/elasticsearch/data"],
+      healthcheck: "curl -fs http://localhost:9200/_cluster/health || exit 1",
     });
   }
 
@@ -722,12 +870,40 @@ async function detectFramework(
 
   if (has("CMakeLists.txt")) {
     return {
-      framework: "unknown",
+      framework: "cmake",
       language: "cpp",
       port: 8080,
       entrypoint: "main",
       buildTool: "cmake",
       notes: ["C/C++ project detected via CMakeLists.txt"],
+    };
+  }
+
+  if (has("pubspec.yaml") || has("pubspec.yml")) {
+    const pubspec = await read(has("pubspec.yaml") ? "pubspec.yaml" : "pubspec.yml");
+    if (/^\s{2,}flutter:\s*$/m.test(pubspec) || /sdk:\s*flutter/.test(pubspec)) {
+      notes.push(
+        "Flutter project detected — the generated Dockerfile targets Dart server apps; Flutter mobile apps are not containerizable as-is.",
+      );
+    }
+    return {
+      framework: "dart",
+      language: "dart",
+      port: 8080,
+      entrypoint: "bin/main.dart",
+      buildTool: "pub",
+      notes,
+    };
+  }
+
+  if (has("project.clj") || has("deps.edn")) {
+    return {
+      framework: "clojure",
+      language: "clojure",
+      port: 8080,
+      entrypoint: has("project.clj") ? "project.clj" : "deps.edn",
+      buildTool: has("project.clj") ? "lein" : "clojure-cli",
+      notes,
     };
   }
 
@@ -959,6 +1135,47 @@ async function detectFramework(
         notes,
       };
     }
+    if (allDeps.astro) {
+      const hasNodeAdapter = Boolean(allDeps["@astrojs/node"]);
+      notes.push(
+        hasNodeAdapter
+          ? "Detected Astro with the Node adapter — serving SSR output."
+          : "Detected Astro (static output) — serving dist/ with nginx.",
+      );
+      return {
+        framework: "astro",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: hasNodeAdapter ? 4321 : 80,
+        entrypoint: hasNodeAdapter ? "./dist/server/entry.mjs" : "dist",
+        buildTool: pm(),
+        notes,
+      };
+    }
+    if (
+      allDeps["@remix-run/node"] ||
+      allDeps["@remix-run/react"] ||
+      allDeps["@remix-run/serve"]
+    ) {
+      return {
+        framework: "remix",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: 3000,
+        entrypoint: "build/server/index.js",
+        buildTool: pm(),
+        notes,
+      };
+    }
+    if (allDeps.gatsby) {
+      notes.push("Detected Gatsby — serving the static public/ output with nginx.");
+      return {
+        framework: "gatsby",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: 80,
+        entrypoint: "public",
+        buildTool: pm(),
+        notes,
+      };
+    }
     if (allDeps["@nestjs/core"]) {
       return {
         framework: "nestjs",
@@ -972,6 +1189,36 @@ async function detectFramework(
     if (allDeps.express) {
       return {
         framework: "express",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: 3000,
+        entrypoint: "index.js",
+        buildTool: pm(),
+        notes,
+      };
+    }
+    if (allDeps.fastify) {
+      return {
+        framework: "fastify",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: 3000,
+        entrypoint: "index.js",
+        buildTool: pm(),
+        notes,
+      };
+    }
+    if (allDeps.koa) {
+      return {
+        framework: "koa",
+        language: depNames.includes("typescript") ? "typescript" : "javascript",
+        port: 3000,
+        entrypoint: "index.js",
+        buildTool: pm(),
+        notes,
+      };
+    }
+    if (allDeps.hono) {
+      return {
+        framework: "hono",
         language: depNames.includes("typescript") ? "typescript" : "javascript",
         port: 3000,
         entrypoint: "index.js",
@@ -1029,6 +1276,18 @@ async function detectFramework(
     };
   }
 
+  if (has("index.html")) {
+    notes.push("No build system detected but index.html found — serving as a static site with nginx.");
+    return {
+      framework: "static",
+      language: "html",
+      port: 80,
+      entrypoint: "index.html",
+      buildTool: "none",
+      notes,
+    };
+  }
+
   notes.push("Could not confidently detect framework — using generic fallback.");
   return {
     framework: "unknown",
@@ -1072,6 +1331,31 @@ export async function analyzeDirectory(
     detection.framework === "dotnet"
       ? await detectDotnetProject(workDir, repoName)
       : { project: "", solution: "", sdkVersion: "" };
+
+  const pythonManager =
+    detection.language === "python"
+      ? await detectPythonManager(workDir, rootFiles)
+      : undefined;
+  const wsgiModule = await detectPythonAppModule(workDir, detection.framework);
+  const goBuildPath =
+    detection.framework === "go"
+      ? await detectGoBuildPath(workDir, rootFiles, repoName)
+      : "";
+  const binaryName =
+    detection.framework === "rust" ? await detectRustBinaryName(workDir) : "";
+
+  if (pythonManager && pythonManager !== "pip") {
+    detection.notes.push(`Detected Python dependency manager: ${pythonManager}.`);
+  }
+  if (wsgiModule) {
+    detection.notes.push(`Detected application entry module: ${wsgiModule}.`);
+  }
+  if (goBuildPath && goBuildPath !== ".") {
+    detection.notes.push(`Detected Go main package at ${goBuildPath}.`);
+  }
+  if (binaryName && binaryName !== repoName) {
+    detection.notes.push(`Detected binary name from Cargo.toml: ${binaryName}.`);
+  }
 
   if (backendSubdir) {
     detection.notes.push(`Monorepo detected — using subdirectory: ${backendSubdir}`);
@@ -1132,6 +1416,10 @@ export async function analyzeDirectory(
     envVars,
     rootFiles,
     existingFiles,
+    pythonManager,
+    wsgiModule,
+    goBuildPath,
+    binaryName,
   };
 }
 
@@ -1153,6 +1441,56 @@ function getBaseImage(
     dotnetAsp: `mcr.microsoft.com/dotnet/aspnet:${version || "8.0"}`,
     jre: `eclipse-temurin:17-jre-alpine`,
   };
+}
+
+function pythonDepsBlock(analysis: AnalysisResult, extraPipPackages = ""): string {
+  const rootFiles = analysis.rootFiles ?? [];
+  const extras = extraPipPackages
+    ? `\nRUN pip install --no-cache-dir ${extraPipPackages}`
+    : "";
+
+  switch (analysis.pythonManager ?? "pip") {
+    case "poetry":
+      return `COPY pyproject.toml poetry.lock* ./
+RUN pip install --no-cache-dir poetry && \\
+    poetry config virtualenvs.create false && \\
+    poetry install --no-interaction --no-ansi --no-root --only main${extras}`;
+    case "uv":
+      return `COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv && \\
+    uv export --frozen --no-dev --no-emit-project -o requirements.txt && \\
+    pip install --no-cache-dir -r requirements.txt${extras}`;
+    case "pipenv":
+      return `COPY Pipfile Pipfile.lock* ./
+RUN pip install --no-cache-dir pipenv && \\
+    pipenv install --system ${rootFiles.includes("Pipfile.lock") ? "--deploy" : "--skip-lock"}${extras}`;
+    case "pdm":
+      return `COPY pyproject.toml pdm.lock* ./
+RUN pip install --no-cache-dir pdm && \\
+    pdm export --prod --without-hashes -o requirements.txt && \\
+    pip install --no-cache-dir -r requirements.txt${extras}`;
+    default:
+      if (rootFiles.length && !rootFiles.includes("requirements.txt")) {
+        // pyproject-based project without a lockfile: install the package itself.
+        return `COPY . .
+RUN pip install --no-cache-dir .${extras}`;
+      }
+      return `COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt${extraPipPackages ? ` ${extraPipPackages}` : ""}`;
+  }
+}
+
+const PYTHON_APT_DEPS = `RUN apt-get update && apt-get install -y --no-install-recommends \\
+    build-essential libpq-dev && rm -rf /var/lib/apt/lists/*`;
+
+const NGINX_STATIC_FIND = `RUN set -e; \\
+    OUT=$(find dist build out public -name index.html -not -path '*/node_modules/*' 2>/dev/null | head -1); \\
+    test -n "$OUT" || { echo "No index.html found in dist/, build/, out/, or public/" >&2; exit 1; }; \\
+    mkdir -p /static && cp -r "$(dirname "$OUT")"/. /static/`;
+
+function nginxServeBlock(port: number): string {
+  return `RUN printf 'server { listen ${port}; root /usr/share/nginx/html; index index.html; location / { try_files $uri $uri/ /index.html; } }' \\
+    > /etc/nginx/conf.d/default.conf`;
 }
 
 const GRADLE_BOOT_JAR_BUILD = `RUN gradle bootJar --no-daemon -x test || gradle jar --no-daemon -x test
@@ -1210,49 +1548,43 @@ CMD ["node", "server.js"]
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-    build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+${PYTHON_APT_DEPS}
+${pythonDepsBlock(analysis, "gunicorn")}
 COPY . .
 RUN python manage.py collectstatic --noinput || true
 EXPOSE ${customizations.port ?? analysis.port}
-CMD ["gunicorn", "--bind", "0.0.0.0:${customizations.port ?? analysis.port}", "${repo}.wsgi:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:${customizations.port ?? analysis.port}", "${analysis.wsgiModule || `${repo}.wsgi:application`}"]
 `;
     case "fastapi":
       return `FROM ${images.python}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-RUN apt-get update && apt-get install -y --no-install-recommends \\
-    build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+${PYTHON_APT_DEPS}
+${pythonDepsBlock(analysis, "uvicorn")}
 COPY . .
 EXPOSE ${customizations.port ?? analysis.port}
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "${customizations.port ?? analysis.port}"]
+CMD ["uvicorn", "${analysis.wsgiModule || "main:app"}", "--host", "0.0.0.0", "--port", "${customizations.port ?? analysis.port}"]
 `;
     case "flask":
       return `FROM ${images.python}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+${pythonDepsBlock(analysis, "gunicorn")}
 COPY . .
 EXPOSE ${customizations.port ?? analysis.port}
-CMD ["gunicorn", "--bind", "0.0.0.0:${customizations.port ?? analysis.port}", "app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:${customizations.port ?? analysis.port}", "${analysis.wsgiModule || "app:app"}"]
 `;
     case "python":
       return `FROM ${images.python}
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+${pythonDepsBlock(analysis)}
 COPY . .
 EXPOSE ${customizations.port ?? analysis.port}
-CMD ["python", "app.py"]
+CMD ["python", "${(analysis.rootFiles ?? []).includes("main.py") ? "main.py" : "app.py"}"]
 `;
     case "spring-boot":
     case "java-gradle":
@@ -1290,7 +1622,7 @@ RUN apk add --no-cache git
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o app -a -ldflags '-extldflags "-static"' .
+RUN CGO_ENABLED=0 GOOS=linux go build -o app -a -ldflags '-extldflags "-static"' ${analysis.goBuildPath || "."}
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
@@ -1309,7 +1641,7 @@ FROM debian:bookworm-slim
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     libssl-dev ca-certificates && rm -rf /var/lib/apt/lists/*
-COPY --from=builder /app/target/release/${repo} app
+COPY --from=builder /app/target/release/${analysis.binaryName || repo} app
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["./app"]
 `;
@@ -1365,10 +1697,9 @@ ENTRYPOINT ["dotnet", "${dllName}.dll"]
     case "express":
     case "nestjs":
     case "nodejs":
-    case "react":
-    case "vue":
-    case "vite":
-    case "angular":
+    case "fastify":
+    case "koa":
+    case "hono":
       return `FROM ${images.node} AS deps
 WORKDIR /app
 ${copyDeps}
@@ -1382,6 +1713,205 @@ COPY . .
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["npm", "start"]
 `;
+    case "react":
+    case "vue":
+    case "vite":
+    case "angular":
+    case "gatsby": {
+      const port = customizations.port ?? analysis.port;
+      return `# Stage 1: Build static assets
+FROM ${images.node} AS builder
+WORKDIR /app
+${copyDeps}
+${install}
+COPY . .
+${build}
+${NGINX_STATIC_FIND}
+
+# Stage 2: Serve with nginx
+FROM nginx:alpine
+COPY --from=builder /static /usr/share/nginx/html
+${nginxServeBlock(port)}
+EXPOSE ${port}
+CMD ["nginx", "-g", "daemon off;"]
+`;
+    }
+    case "astro": {
+      const port = customizations.port ?? analysis.port;
+      if (analysis.entrypoint === "./dist/server/entry.mjs") {
+        return `# Stage 1: Dependencies
+FROM ${images.node} AS deps
+WORKDIR /app
+${copyDeps}
+${install}
+
+# Stage 2: Build
+FROM ${images.node} AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+${build}
+
+# Stage 3: Runner
+FROM ${images.node} AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/package.json ./package.json
+EXPOSE ${port}
+ENV HOST=0.0.0.0
+ENV PORT=${port}
+CMD ["node", "./dist/server/entry.mjs"]
+`;
+      }
+      return `# Stage 1: Build static assets
+FROM ${images.node} AS builder
+WORKDIR /app
+${copyDeps}
+${install}
+COPY . .
+${build}
+${NGINX_STATIC_FIND}
+
+# Stage 2: Serve with nginx
+FROM nginx:alpine
+COPY --from=builder /static /usr/share/nginx/html
+${nginxServeBlock(port)}
+EXPOSE ${port}
+CMD ["nginx", "-g", "daemon off;"]
+`;
+    }
+    case "remix":
+      return `FROM ${images.node} AS builder
+WORKDIR /app
+${copyDeps}
+${install}
+COPY . .
+${build}
+
+FROM ${images.node} AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app ./
+EXPOSE ${customizations.port ?? analysis.port}
+ENV PORT=${customizations.port ?? analysis.port}
+CMD ["npm", "run", "start"]
+`;
+    case "sinatra":
+    case "ruby": {
+      const port = customizations.port ?? analysis.port;
+      const rootFiles = analysis.rootFiles ?? [];
+      const cmd = rootFiles.includes("config.ru")
+        ? `CMD ["bundle", "exec", "rackup", "--host", "0.0.0.0", "-p", "${port}"]`
+        : `CMD ["bundle", "exec", "ruby", "${rootFiles.includes("main.rb") ? "main.rb" : "app.rb"}"]`;
+      return `FROM ${images.ruby}
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
+COPY Gemfile Gemfile.lock* ./
+RUN bundle install
+COPY . .
+EXPOSE ${port}
+${cmd}
+`;
+    }
+    case "symfony":
+    case "php": {
+      const port = customizations.port ?? analysis.port;
+      const docRoot =
+        analysis.framework === "symfony" ||
+        !(analysis.rootFiles ?? []).includes("index.php")
+          ? "public"
+          : ".";
+      return `FROM ${images.php}
+WORKDIR /var/www
+RUN apk add --no-cache \\
+    postgresql-dev libpng-dev libzip-dev zip unzip \\
+    && docker-php-ext-install pdo pdo_pgsql zip
+COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+COPY composer.json composer.lock* ./
+RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction
+COPY . .
+EXPOSE ${port}
+CMD ["php", "-S", "0.0.0.0:${port}", "-t", "${docRoot}"]
+`;
+    }
+    case "dart":
+      return `FROM dart:stable AS builder
+WORKDIR /app
+COPY pubspec.* ./
+RUN dart pub get
+COPY . .
+RUN set -e; \\
+    TARGET=$(ls bin/*.dart 2>/dev/null | head -1); \\
+    test -n "$TARGET" || { echo "No entry script found in bin/" >&2; exit 1; }; \\
+    dart compile exe "$TARGET" -o /app/server
+
+FROM debian:bookworm-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/server ./server
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["./server"]
+`;
+    case "clojure": {
+      const port = customizations.port ?? analysis.port;
+      if ((analysis.rootFiles ?? []).includes("project.clj")) {
+        return `FROM clojure:temurin-17-lein AS builder
+WORKDIR /app
+COPY project.clj ./
+RUN lein deps
+COPY . .
+RUN lein uberjar
+
+FROM eclipse-temurin:17-jre-alpine
+WORKDIR /app
+COPY --from=builder /app/target/uberjar/*-standalone.jar app.jar
+EXPOSE ${port}
+CMD ["java", "-jar", "app.jar"]
+`;
+      }
+      return `FROM clojure:temurin-17-tools-deps
+WORKDIR /app
+COPY deps.edn ./
+RUN clojure -P
+COPY . .
+EXPOSE ${port}
+# Adjust -m to your main namespace if it differs.
+CMD ["clojure", "-M", "-m", "${repo}.core"]
+`;
+    }
+    case "cmake":
+      return `FROM gcc:13 AS builder
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    cmake ninja-build && rm -rf /var/lib/apt/lists/*
+COPY . .
+RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
+RUN set -e; \\
+    BIN=$(find build -maxdepth 3 -type f -perm -u+x ! -name '*.so*' ! -name '*.a' ! -name 'CMake*' ! -name '*.cmake' | head -1); \\
+    test -n "$BIN" || { echo "No built executable found under build/" >&2; exit 1; }; \\
+    cp "$BIN" /app/server
+
+FROM debian:bookworm-slim
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \\
+    ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /app/server ./server
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["./server"]
+`;
+    case "static": {
+      const port = customizations.port ?? analysis.port;
+      return `FROM nginx:alpine
+COPY . /usr/share/nginx/html
+${nginxServeBlock(port)}
+EXPOSE ${port}
+CMD ["nginx", "-g", "daemon off;"]
+`;
+    }
     case "nuxt":
       return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
@@ -1528,17 +2058,28 @@ const ENV_FRAMEWORKS = new Set([
   "express",
   "nestjs",
   "nodejs",
+  "remix",
+  "astro",
+  "fastify",
+  "koa",
+  "hono",
   "django",
   "fastapi",
   "flask",
   "python",
   "rails",
+  "sinatra",
+  "ruby",
   "laravel",
+  "symfony",
+  "php",
   "phoenix",
   "elixir",
   "spring-boot",
   "dotnet",
   "deno",
+  "dart",
+  "clojure",
 ]);
 
 export function generateDockerCompose(
@@ -1574,7 +2115,9 @@ export function generateDockerCompose(
   if (activeServices.length) {
     yaml += `    depends_on:\n`;
     for (const svc of activeServices) {
-      yaml += `      - ${svc.name}\n`;
+      yaml += `      ${svc.name}:\n        condition: ${
+        svc.healthcheck ? "service_healthy" : "service_started"
+      }\n`;
     }
   }
 
@@ -1597,6 +2140,10 @@ export function generateDockerCompose(
       for (const vol of svc.volumes) {
         yaml += `      - ${vol}\n`;
       }
+    }
+    if (svc.healthcheck) {
+      const test = svc.healthcheck.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+      yaml += `    healthcheck:\n      test: ["CMD-SHELL", "${test}"]\n      interval: 5s\n      timeout: 5s\n      retries: 12\n`;
     }
   }
 
