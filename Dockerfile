@@ -32,7 +32,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ARG DOCKER_GID=999
 RUN apk add --no-cache docker-cli docker-cli-compose && \
     addgroup -g 1001 -S nodejs && \
-    adduser -S nextjs -u 1001 -G nodejs && \
+    adduser -S nextjs -u 1001 -G nodejs -h /home/nextjs && \
+    mkdir -p /home/nextjs/.docker && \
+    chown -R nextjs:nodejs /home/nextjs && \
     if getent group "${DOCKER_GID}" >/dev/null 2>&1; then \
       adduser nextjs "$(getent group "${DOCKER_GID}" | cut -d: -f1)"; \
     else \
@@ -59,5 +61,7 @@ ENV BUILD_SERVICE_PORT=5173
 ENV BUILD_SERVICE_TOKEN=
 ENV BUILD_SERVICE_ORIGINS=
 ENV HOSTNAME=0.0.0.0
+ENV HOME=/home/nextjs
+ENV DOCKER_CONFIG=/home/nextjs/.docker
 VOLUME ["/var/run/docker.sock"]
 CMD ["/app/start.sh"]

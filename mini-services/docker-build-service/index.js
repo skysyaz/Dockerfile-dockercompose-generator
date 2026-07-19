@@ -8,6 +8,7 @@ import * as path from "path";
 import * as os from "os";
 import * as tar from "tar";
 import { Server } from "socket.io";
+import { dockerEnv, resolveComposeCommand } from "./compose.js";
 
 const PORT = Number(process.env.BUILD_SERVICE_PORT || 5173);
 const BUILD_TOKEN = process.env.BUILD_SERVICE_TOKEN || "";
@@ -143,7 +144,17 @@ io.on("connection", (socket) => {
     const log = (stream, text) => emitLog(socket, stream, text);
 
     try {
-      const dockerCheck = spawn("docker", ["--version"]);
+      const composeCommand = await resolveComposeCommand();
+      if (!composeCommand) {
+        log(
+          "stderr",
+          "Docker Compose is not available in this container. Ensure docker-cli-compose is installed.",
+        );
+        socket.emit("done", { success: false, reason: "no-compose", exitCode: null });
+        return;
+      }
+
+      const dockerCheck = spawn("docker", ["--version"], { env: dockerEnv() });
       const dockerOk = await new Promise((resolve) => {
         dockerCheck.on("close", (code) => resolve(code === 0));
         dockerCheck.on("error", () => resolve(false));
@@ -183,8 +194,17 @@ io.on("connection", (socket) => {
         log("system", `[write] ${file.name} (${file.content.length} bytes)`);
       }
 
-      const compose = spawn("docker", ["compose", "up", "--build", "--abort-on-container-exit"], {
+      const composeArgs = composeCommand([
+        "up",
+        "--build",
+        "--abort-on-container-exit",
+      ]);
+      const [composeBin, ...composeArgv] = composeArgs;
+      log("system", `[compose] ${composeBin} ${composeArgv.join(" ")}`);
+
+      const compose = spawn(composeBin, composeArgv, {
         cwd: workDir,
+        env: dockerEnv(),
       });
 
       const onData = (stream) => (chunk) => {
@@ -225,9 +245,14 @@ io.on("connection", (socket) => {
       socket.emit("done", { success: false, exitCode: null });
     } finally {
       if (workDir) {
-        spawn("docker", ["compose", "down", "--volumes", "--remove-orphans"], {
-          cwd: workDir,
-        });
+        const downCommand = await resolveComposeCommand();
+        if (downCommand) {
+          const downArgs = downCommand(["down", "--volumes", "--remove-orphans"]);
+          spawn(downArgs[0], downArgs.slice(1), {
+            cwd: workDir,
+            env: dockerEnv(),
+          });
+        }
         await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
         log("system", "[cleanup] work directory removed");
       }
