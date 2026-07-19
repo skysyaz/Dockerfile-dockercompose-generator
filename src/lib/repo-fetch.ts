@@ -5,10 +5,20 @@ import * as fs from "fs/promises";
 import * as tar from "tar";
 import {
   getProviderLabel,
+  isOfficialGitlabHost,
   isPrivateGitHost,
   parseRepoUrl,
   type ParsedRepoUrl,
 } from "./repo-url";
+
+function assertNotPrivateHost(host: string): void {
+  if (isPrivateGitHost(host) && process.env.ALLOW_PRIVATE_GIT_HOSTS !== "true") {
+    throw new Error(
+      `Refusing to fetch from private or internal host '${host}'. ` +
+        "Set ALLOW_PRIVATE_GIT_HOSTS=true on the server to allow internal Git hosts.",
+    );
+  }
+}
 
 const DEFAULT_BRANCHES = ["main", "master", "HEAD"];
 const EXTRACT_TIMEOUT_MS = 300_000;
@@ -100,6 +110,9 @@ async function fetchGitlabArchive(
   dest: string,
   accessToken?: string,
 ): Promise<void> {
+  if (!isOfficialGitlabHost(parsed.host)) {
+    assertNotPrivateHost(parsed.host);
+  }
   const encoded = encodeURIComponent(parsed.projectPath);
   const headers: Record<string, string> = {
     "User-Agent": "DockGen/1.0",
@@ -165,15 +178,7 @@ async function fetchGiteaArchive(
   dest: string,
   accessToken?: string,
 ): Promise<void> {
-  if (
-    isPrivateGitHost(parsed.host) &&
-    process.env.ALLOW_PRIVATE_GIT_HOSTS !== "true"
-  ) {
-    throw new Error(
-      `Refusing to fetch from private or internal host '${parsed.host}'. ` +
-        "Set ALLOW_PRIVATE_GIT_HOSTS=true on the server to allow internal Git hosts.",
-    );
-  }
+  assertNotPrivateHost(parsed.host);
   const [owner, repo] = parsed.projectPath.split("/");
   const headers: Record<string, string> = {
     "User-Agent": "DockGen/1.0",

@@ -56,6 +56,7 @@ export async function POST(request: NextRequest) {
     const token = resolveAccessToken(
       parsed.provider,
       body.accessToken || body.githubToken,
+      parsed.host,
     );
     const customizations: Customizations = {
       port: sanitizePort(body.port),

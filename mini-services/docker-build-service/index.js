@@ -131,7 +131,7 @@ io.on("connection", (socket) => {
         log("system", `[fetch] downloading tarball for ${repoUrl}`);
         try {
           const parsed = parseRepoUrl(repoUrl);
-          const accessToken = resolveAccessToken(parsed?.provider, githubToken);
+          const accessToken = resolveAccessToken(parsed?.provider, githubToken, parsed?.host);
           await fetchRepoArchive(repoUrl, workDir, accessToken);
           log("system", "[fetch] done");
         } catch (error) {

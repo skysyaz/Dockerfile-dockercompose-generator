@@ -186,6 +186,55 @@ describe("new framework detection", () => {
   });
 });
 
+describe("monorepo compose build context", () => {
+  it("points the build context at the backend subdirectory", () => {
+    const analysis: AnalysisResult = {
+      ...base,
+      framework: "fastapi",
+      backendSubdir: "backend",
+    };
+    const compose = generateDockerCompose(analysis, {});
+    assert.match(compose, /context: \.\/backend/);
+    assert.match(compose, /dockerfile: \.\.\/Dockerfile/);
+  });
+
+  it("keeps root context for .NET (its Dockerfile is repo-root aware)", () => {
+    const analysis: AnalysisResult = {
+      ...base,
+      framework: "dotnet",
+      backendSubdir: "backend",
+    };
+    assert.match(generateDockerCompose(analysis, {}), /build: \./);
+  });
+
+  it("escapes nested subdirectories correctly", () => {
+    const analysis: AnalysisResult = {
+      ...base,
+      framework: "go",
+      backendSubdir: "services/api",
+    };
+    const compose = generateDockerCompose(analysis, {});
+    assert.match(compose, /context: \.\/services\/api/);
+    assert.match(compose, /dockerfile: \.\.\/\.\.\/Dockerfile/);
+  });
+});
+
+describe("go build path hardening", () => {
+  it("rejects unsafe path characters", async () => {
+    await withFixture(
+      {
+        "go.mod": "module example.com/api\n\ngo 1.22\n",
+        "cmd/a b$(x)/main.go": "package main\nfunc main() {}\n",
+      },
+      async (dir) => {
+        const analysis = await analyzeDirectory("https://github.com/o/api", dir);
+        assert.equal(analysis.goBuildPath, "");
+        assert.match(generateDockerfile(analysis, {}), /go build .* "\."/);
+      },
+    );
+  });
+});
+
 describe("compose healthchecks", () => {
   it("emits healthchecks and healthy depends_on conditions", () => {
     const analysis: AnalysisResult = {

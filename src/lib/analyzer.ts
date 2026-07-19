@@ -511,7 +511,8 @@ async function detectPythonAppModule(
       )[0];
     if (wsgi) {
       const mod = wsgi.replace(/\.py$/, "").split("/").join(".");
-      return `${mod}:application`;
+      // Interpolated into the CMD array — only allow module-path characters.
+      if (/^[A-Za-z0-9_.]+$/.test(mod)) return `${mod}:application`;
     }
     return "";
   }
@@ -558,22 +559,27 @@ async function detectGoBuildPath(
     .filter((f) => path.basename(f) === "main.go")
     .map((f) => toPosixRelative(workDir, path.dirname(f)));
   if (!mainDirs.length) return "";
-  const repoLower = repoName.toLowerCase();
+  const repoLower = repoName.toLowerCase().replace(/[^a-z0-9._-]/g, "");
   const preferred =
-    mainDirs.find((d) => new RegExp(`^cmd/${repoLower}$`, "i").test(d)) ??
+    mainDirs.find((d) => d.toLowerCase() === `cmd/${repoLower}`) ??
     mainDirs.find((d) => /^cmd\/(server|api|app|web|main)$/i.test(d)) ??
     mainDirs.find((d) => d.startsWith("cmd/")) ??
     mainDirs.sort((a, b) => a.split("/").length - b.split("/").length)[0];
-  return preferred ? `./${preferred}` : "";
+  // The path is interpolated into a RUN instruction — refuse anything that
+  // isn't a plain relative path of safe characters.
+  if (!preferred || !/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(preferred) || preferred.includes("..")) {
+    return "";
+  }
+  return `./${preferred}`;
 }
 
 async function detectRustBinaryName(workDir: string): Promise<string> {
   const cargo = await readText(path.join(workDir, "Cargo.toml"));
   if (!cargo) return "";
   const bin = cargo.match(/\[\[bin\]\][^[]*?name\s*=\s*"([^"]+)"/);
-  if (bin) return bin[1];
-  const pkg = cargo.match(/\[package\][^[]*?name\s*=\s*"([^"]+)"/);
-  return pkg?.[1] ?? "";
+  const name = bin?.[1] ?? cargo.match(/\[package\][^[]*?name\s*=\s*"([^"]+)"/)?.[1] ?? "";
+  // Interpolated into a COPY instruction — only allow crate-name characters.
+  return /^[A-Za-z0-9._-]+$/.test(name) ? name : "";
 }
 
 async function refreshAnalysisRootFiles(
@@ -1622,7 +1628,7 @@ RUN apk add --no-cache git
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -o app -a -ldflags '-extldflags "-static"' ${analysis.goBuildPath || "."}
+RUN CGO_ENABLED=0 GOOS=linux go build -o app -a -ldflags '-extldflags "-static"' "${analysis.goBuildPath || "."}"
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
 WORKDIR /root/
@@ -1960,7 +1966,7 @@ CMD ["npm", "start"]
       return `FROM elixir:1.16-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache build-base git
-COPY mix.exs mix.lock ./
+COPY mix.exs mix.lock* ./
 RUN mix local.hex --force && mix local.rebar --force
 RUN mix deps.get --only prod
 COPY . .
@@ -2098,7 +2104,20 @@ export function generateDockerCompose(
   );
   const repo = analysis.repoName;
 
-  let yaml = `services:\n  app:\n    build: .\n    container_name: ${repo}-app\n    ports:\n      - "${port}:${port}"\n    restart: unless-stopped\n`;
+  // For monorepos the Dockerfile's COPY paths are relative to the backend
+  // subdirectory, so the build context must point there. The Dockerfile itself
+  // lives at the repo root (where generated files are written), which compose
+  // supports via a context-escaping dockerfile path. .NET templates are the
+  // exception: they COPY the whole repo and prefix paths with the subdir.
+  const backendContext =
+    analysis.framework !== "dotnet"
+      ? (analysis.backendSubdir || "").replace(/\\/g, "/")
+      : "";
+  const buildBlock = backendContext
+    ? `    build:\n      context: ./${backendContext}\n      dockerfile: ${"../".repeat(backendContext.split("/").length)}Dockerfile\n`
+    : `    build: .\n`;
+
+  let yaml = `services:\n  app:\n${buildBlock}    container_name: ${repo}-app\n    ports:\n      - "${port}:${port}"\n    restart: unless-stopped\n`;
 
   if (ENV_FRAMEWORKS.has(analysis.framework) || analysis.envVars.length) {
     yaml += `    env_file:\n      - .env\n`;

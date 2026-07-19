@@ -11,6 +11,8 @@ export function dependencyCopyLine(rootFiles: string[]): string {
   for (const file of LOCKFILE_NAMES) {
     if (rootFiles.includes(file)) copies.push(file);
   }
+  // pnpm resolves workspace packages from this file; installs fail without it.
+  if (rootFiles.includes("pnpm-workspace.yaml")) copies.push("pnpm-workspace.yaml");
   return `COPY ${copies.join(" ")} ./`;
 }
 

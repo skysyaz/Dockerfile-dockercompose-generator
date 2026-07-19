@@ -159,24 +159,43 @@ export function isPrivateGitHost(host: string): boolean {
   return !name.includes(".");
 }
 
+function hostMatchesEnv(host: string, envHost?: string): boolean {
+  return Boolean(envHost && host === envHost.trim().toLowerCase());
+}
+
+export function isOfficialGitlabHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "gitlab.com" || h.endsWith(".gitlab.com");
+}
+
 export function resolveAccessToken(
   provider: RepoProvider,
   requestToken?: string,
+  host?: string,
 ): string | undefined {
   const token = requestToken?.trim();
   if (token) return token;
-  // Never fall back to another provider's token: it would not authenticate
-  // and would leak the credential to a foreign (possibly self-hosted) API.
+  const h = (host ?? "").trim().toLowerCase();
+  // Never fall back to another provider's token, and never send an env token
+  // to a host it wasn't configured for — a parsed URL like gitlab.evil.com
+  // must not receive GITLAB_TOKEN. Self-managed instances opt in explicitly
+  // via GITLAB_HOST / GITEA_HOST.
   switch (provider) {
     case "github":
       return process.env.GITHUB_TOKEN || undefined;
     case "gitlab":
-      return process.env.GITLAB_TOKEN || undefined;
+      if (h && (isOfficialGitlabHost(h) || hostMatchesEnv(h, process.env.GITLAB_HOST))) {
+        return process.env.GITLAB_TOKEN || undefined;
+      }
+      return undefined;
     case "bitbucket":
       return process.env.BITBUCKET_TOKEN || undefined;
     case "codeberg":
     case "gitea":
     default:
-      return process.env.GITEA_TOKEN || undefined;
+      if (h && hostMatchesEnv(h, process.env.GITEA_HOST)) {
+        return process.env.GITEA_TOKEN || undefined;
+      }
+      return undefined;
   }
 }

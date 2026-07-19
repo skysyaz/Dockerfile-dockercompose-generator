@@ -115,28 +115,49 @@ export function parseRepoUrl(url) {
   return null;
 }
 
-export function resolveAccessToken(provider, requestToken) {
+function hostMatchesEnv(host, envHost) {
+  return Boolean(envHost && host === envHost.trim().toLowerCase());
+}
+
+export function isOfficialGitlabHost(host) {
+  const h = String(host).toLowerCase();
+  return h === "gitlab.com" || h.endsWith(".gitlab.com");
+}
+
+export function resolveAccessToken(provider, requestToken, host) {
   const token = typeof requestToken === "string" ? requestToken.trim() : "";
   if (token) return token;
-  // Never fall back to another provider's token: it would not authenticate
-  // and would leak the credential to a foreign (possibly self-hosted) API.
+  const h = String(host ?? "").trim().toLowerCase();
+  // Never fall back to another provider's token, and never send an env token
+  // to a host it wasn't configured for — a parsed URL like gitlab.evil.com
+  // must not receive GITLAB_TOKEN. Self-managed instances opt in explicitly
+  // via GITLAB_HOST / GITEA_HOST.
   switch (provider) {
     case "github":
       return process.env.GITHUB_TOKEN || undefined;
     case "gitlab":
-      return process.env.GITLAB_TOKEN || undefined;
+      if (h && (isOfficialGitlabHost(h) || hostMatchesEnv(h, process.env.GITLAB_HOST))) {
+        return process.env.GITLAB_TOKEN || undefined;
+      }
+      return undefined;
     case "bitbucket":
       return process.env.BITBUCKET_TOKEN || undefined;
     case "codeberg":
     case "gitea":
     default:
-      return process.env.GITEA_TOKEN || undefined;
+      if (h && hostMatchesEnv(h, process.env.GITEA_HOST)) {
+        return process.env.GITEA_TOKEN || undefined;
+      }
+      return undefined;
   }
 }
 
 async function extractTarball(response, dest) {
   if (!response.ok) {
     throw new Error(`Archive download failed with status ${response.status}`);
+  }
+  if (!response.body) {
+    throw new Error("Archive download returned an empty body");
   }
   await fs.mkdir(dest, { recursive: true });
   const nodeStream = Readable.fromWeb(response.body);
@@ -209,6 +230,16 @@ export async function fetchRepoArchive(repoUrl, dest, accessToken) {
   }
 
   if (parsed.provider === "gitlab") {
+    if (
+      !isOfficialGitlabHost(parsed.host) &&
+      isPrivateGitHost(parsed.host) &&
+      process.env.ALLOW_PRIVATE_GIT_HOSTS !== "true"
+    ) {
+      throw new Error(
+        `Refusing to fetch from private or internal host '${parsed.host}'. ` +
+          "Set ALLOW_PRIVATE_GIT_HOSTS=true on the server to allow internal Git hosts.",
+      );
+    }
     const encoded = encodeURIComponent(parsed.projectPath);
     const res = await fetchWithTimeout(
       `https://${parsed.host}/api/v4/projects/${encoded}/repository/archive.tar.gz`,

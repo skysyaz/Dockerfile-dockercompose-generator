@@ -39,6 +39,7 @@ export async function POST(request: NextRequest) {
     const token = resolveAccessToken(
       parsed.provider,
       body.accessToken || body.githubToken,
+      parsed.host,
     );
     const { analysis } = await cloneAndAnalyze(repoUrl, token);
 

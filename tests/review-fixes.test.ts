@@ -137,7 +137,7 @@ describe("generateDockerfile", () => {
     };
     const dockerfile = generateDockerfile(analysis, {});
 
-    assert.match(dockerfile, /COPY package\*\.json pnpm-lock\.yaml \.\//);
+    assert.match(dockerfile, /COPY package\*\.json pnpm-lock\.yaml pnpm-workspace\.yaml \.\//);
     assert.doesNotMatch(dockerfile, /yarn\.lock/);
     assert.doesNotMatch(dockerfile, /bun\.lock/);
     assert.match(dockerfile, /pnpm install --frozen-lockfile/);
@@ -262,6 +262,13 @@ describe("node-docker lockfile handling", () => {
     assert.equal(
       dependencyCopyLine(["package.json", "package-lock.json"]),
       "COPY package*.json package-lock.json ./",
+    );
+  });
+
+  it("includes pnpm-workspace.yaml for pnpm monorepos", () => {
+    assert.equal(
+      dependencyCopyLine(["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"]),
+      "COPY package*.json pnpm-lock.yaml pnpm-workspace.yaml ./",
     );
   });
 
