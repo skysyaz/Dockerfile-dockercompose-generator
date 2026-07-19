@@ -1,120 +1,72 @@
-# Docker Configuration Generator
+# DockGen — Docker Config Generator
 
-A web application that analyzes GitHub repositories and generates tailored `Dockerfile` and `docker-compose.yml` files based on the detected language and framework.
+**DockGen** is a self-hostable Next.js 16 web app that analyzes GitHub repositories and generates production-ready Docker configuration files.
 
 ## Features
 
-- **Repository analysis** — clones a public GitHub repository and inspects manifest files
-- **Framework detection** — supports Node.js, Python, Django, Flask, Java, Ruby, Rails, PHP, Laravel, Go, Rust, and .NET
-- **Dockerfile generation** — creates stack-specific build and run instructions
-- **Docker Compose generation** — adds ports, volumes, environment variables, and database services when needed
-- **Download support** — preview and download generated files from the browser
+- Analyze public and private GitHub repos via tarball API (no `git` binary required)
+- Detect 15+ frameworks with monorepo support
+- Generate `Dockerfile`, `docker-compose.yml`, `.dockerignore`, `.env`, and `.env.example`
+- Customize port, base image version, environment variables, and backing services
+- Download individual files or a ZIP bundle
+- Optional live **Test Build** via WebSocket + Docker Compose
 
-## Quick start
-
-### Run with Docker (recommended)
+## Quick start (self-hosting)
 
 ```bash
 cp .env.example .env
 docker compose up --build -d
 ```
 
-Open [http://localhost:5173](http://localhost:5173).
+Open http://localhost:5172
 
-### Deploy on Dokploy
+### One container, two ports
 
-1. Create a new **Docker Compose** application in Dokploy.
-2. Point it at this repository (or upload the project).
-3. Set the compose file to `docker-compose.yml`.
-4. Add environment variables from `.env.example`:
-   - `PORT=5173`
-   - `PYTHONUNBUFFERED=1`
-5. In Dokploy, set the **container port** to `5173`.
-6. Deploy the service.
+DockGen runs as a **single Docker container** with two processes inside:
 
-The app runs as a single container: the React frontend is built into the image and served by FastAPI on port `5173`.
+| Port | Service |
+|------|---------|
+| `5172` | Next.js web UI |
+| `5173` | WebSocket build service (Test Build) |
 
-### Run locally for development
+You do **not** need two containers. Both services start from `scripts/start.sh` in the same image.
 
-**Backend**
+The Test Build feature requires mounting `/var/run/docker.sock` (included in `docker-compose.yml`).
 
-```bash
-cd backend
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
-```
+### Dokploy deployment
 
-**Frontend**
+1. Create a **Docker Compose** app pointing at this repo
+2. Set container ports: `5172` (web) and `5173` (WebSocket)
+3. Copy env vars from `.env.example`
+4. Ensure `docker.sock` volume is mounted for Test Build
+
+## Local development
 
 ```bash
-cd frontend
 npm install
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173). The Vite dev server proxies API requests to port 8000.
+In another terminal, start the build service:
+
+```bash
+cd mini-services/docker-build-service
+npm install
+node index.js
+```
+
+## Tech stack
+
+- Next.js 16 (App Router, `output: "standalone"`)
+- TypeScript 5
+- Tailwind CSS 4 + shadcn/ui
+- sonner, react-syntax-highlighter, jszip, tar, socket.io
 
 ## API
 
-### `POST /api/generate`
-
-Request body:
-
-```json
-{
-  "repo_url": "https://github.com/username/repository"
-}
-```
-
-Response:
-
-```json
-{
-  "framework": "node",
-  "repo_name": "repository",
-  "dockerfile": "...",
-  "docker_compose": "..."
-}
-```
-
-### `GET /api/health`
-
-Health check endpoint.
-
-### `GET /api/frameworks`
-
-Returns the list of supported frameworks.
-
-## Testing
-
-```bash
-cd backend
-pip install -r requirements.txt -r requirements-dev.txt
-pytest
-```
-
-## Project structure
-
-```
-.
-├── backend/
-│   ├── generator.py      # Core analysis and generation logic
-│   ├── main.py           # FastAPI application
-│   └── tests/
-├── frontend/
-│   └── src/              # React UI
-├── Dockerfile
-└── docker-compose.yml
-```
-
-## Notes
-
-- Only public `https://github.com/...` URLs are accepted.
-- Repositories are cloned into a temporary directory and removed after processing.
-- Generated files are starting points — review and adjust them for your production needs.
+- `POST /api/analyze` — clone + analyze repository
+- `POST /api/generate` — apply customizations and return generated files
 
 ## License
 
-MIT
+MIT (generated configs are MIT-licensed)

@@ -7,30 +7,17 @@ on:
     branches: [main]
 
 jobs:
-  backend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install dependencies
-        run: |
-          pip install -r backend/requirements.txt -r backend/requirements-dev.txt
-      - name: Run tests
-        run: |
-          cd backend
-          PYTHONPATH=. pytest -q
-
-  frontend:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Install and build
-        run: |
-          cd frontend
-          npm install
-          npm run build
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint
+      - name: Build
+        run: npm run build

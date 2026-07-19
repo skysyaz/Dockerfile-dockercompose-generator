@@ -1,0 +1,14 @@
+{
+  "name": "docker-build-service",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.1",
+    "tar": "^7.5.4"
+  }
+}
