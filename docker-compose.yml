@@ -1,6 +1,7 @@
 # Single container — two processes inside (Next.js + build WebSocket service)
+# Service name must be `app` for Dokploy domain routing
 services:
-  dockgen:
+  app:
     build: .
     container_name: dockgen
     ports:
