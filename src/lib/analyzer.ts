@@ -228,13 +228,14 @@ async function globFiles(
   depth: number,
 ): Promise<string[]> {
   if (depth > 3) return [];
+  const suffix = pattern.startsWith("*.") ? pattern.slice(1) : null;
   const results: string[] = [];
   const entries = await fs.readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (SKIP_DIRS.has(entry.name)) continue;
     const full = path.join(dir, entry.name);
     if (entry.isFile()) {
-      if (pattern === "*.csproj" && entry.name.endsWith(".csproj")) {
+      if (suffix && entry.name.endsWith(suffix)) {
         results.push(full);
       }
     } else if (entry.isDirectory()) {
@@ -242,6 +243,68 @@ async function globFiles(
     }
   }
   return results;
+}
+
+function toPosixRelative(base: string, target: string): string {
+  return path.relative(base, target).split(path.sep).join("/");
+}
+
+function dotnetContextPath(analysis: AnalysisResult, relativePath: string): string {
+  const normalized = relativePath.replace(/\\/g, "/");
+  if (!analysis.backendSubdir) return normalized;
+  return `${analysis.backendSubdir.replace(/\\/g, "/")}/${normalized}`;
+}
+
+async function scoreCsproj(csprojPath: string, repoName: string): Promise<number> {
+  const content = await readText(csprojPath);
+  const name = path.basename(csprojPath, ".csproj").toLowerCase();
+  let score = 0;
+
+  if (/Microsoft\.NET\.Sdk\.Web/i.test(content)) score += 100;
+  if (/OutputType>\s*Exe/i.test(content)) score += 50;
+  if (/OutputType>\s*WinExe/i.test(content)) score += 40;
+  if (/\b(web|api|app|server|host)\b/i.test(name)) score += 20;
+  if (name === repoName.toLowerCase()) score += 30;
+  if (/\b(test|tests|spec|unit)\b/i.test(name)) score -= 80;
+
+  return score;
+}
+
+export async function detectDotnetProject(
+  workDir: string,
+  repoName: string,
+): Promise<{ project: string; solution: string }> {
+  const csprojs = await globFiles(workDir, "*.csproj", 0);
+  if (!csprojs.length) {
+    return { project: `${repoName}.csproj`, solution: "" };
+  }
+
+  const ranked = await Promise.all(
+    csprojs.map(async (absPath) => {
+      const rel = toPosixRelative(workDir, absPath);
+      const score = await scoreCsproj(absPath, repoName);
+      return {
+        rel,
+        score: score - rel.split("/").length,
+      };
+    }),
+  );
+
+  ranked.sort((a, b) => b.score - a.score);
+  const project = ranked[0]?.rel ?? `${repoName}.csproj`;
+
+  const rootEntries = await fs.readdir(workDir, { withFileTypes: true });
+  const rootSlns = rootEntries
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".sln"))
+    .map((entry) => entry.name);
+  const solution =
+    rootSlns.length === 1
+      ? rootSlns[0]
+      : rootSlns.find((name) => name.toLowerCase().includes(repoName.toLowerCase())) ??
+        rootSlns[0] ??
+        "";
+
+  return { project, solution };
 }
 
 function detectPackageManager(root: string, files: string[]): string {
@@ -850,9 +913,24 @@ export async function analyzeDirectory(
   const services = detectServices(dependencies);
   const existing = await readExistingDockerFiles(workDir);
   const existingFiles = Object.keys(existing);
+  const dotnet =
+    detection.framework === "dotnet"
+      ? await detectDotnetProject(workDir, repoName)
+      : { project: "", solution: "" };
 
   if (backendSubdir) {
     detection.notes.push(`Monorepo detected — using subdirectory: ${backendSubdir}`);
+  }
+
+  if (detection.framework === "dotnet" && dotnet.project) {
+    detection.entrypoint = `${path.basename(dotnet.project, ".csproj")}.dll`;
+    if (dotnet.solution) {
+      detection.notes.push(
+        `Detected .NET solution ${dotnet.solution} with entry project ${dotnet.project}.`,
+      );
+    } else {
+      detection.notes.push(`Detected .NET entry project ${dotnet.project}.`);
+    }
   }
 
   if (existingFiles.length) {
@@ -875,6 +953,8 @@ export async function analyzeDirectory(
     dependencies,
     notes: detection.notes,
     backendSubdir,
+    dotnetProject: dotnet.project,
+    dotnetSolution: dotnet.solution,
     existingFiles,
   };
 }
@@ -1105,20 +1185,29 @@ RUN chown -R www-data:www-data /var/www
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=${customizations.port ?? analysis.port}"]
 `;
-    case "dotnet":
+    case "dotnet": {
+      const projectPath = dotnetContextPath(
+        analysis,
+        analysis.dotnetProject || `${repo}.csproj`,
+      );
+      const restoreTarget = analysis.dotnetSolution
+        ? `"${dotnetContextPath(analysis, analysis.dotnetSolution)}"`
+        : `"${projectPath}"`;
+      const dllName = path.posix.basename(projectPath, ".csproj");
+
       return `FROM ${images.dotnetSdk} AS builder
 WORKDIR /app
-COPY *.csproj .
-RUN dotnet restore
 COPY . .
-RUN dotnet publish -c Release -o out
+RUN dotnet restore ${restoreTarget}
+RUN dotnet publish "${projectPath}" -c Release -o /app/out
 FROM ${images.dotnetAsp}
 WORKDIR /app
 COPY --from=builder /app/out .
 ENV ASPNETCORE_URLS=http://+:${customizations.port ?? analysis.port}
 EXPOSE ${customizations.port ?? analysis.port}
-ENTRYPOINT ["dotnet", "${repo}.dll"]
+ENTRYPOINT ["dotnet", "${dllName}.dll"]
 `;
+    }
     case "express":
     case "nestjs":
     case "nodejs":

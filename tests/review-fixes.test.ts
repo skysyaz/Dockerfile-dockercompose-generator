@@ -1,8 +1,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "fs/promises";
+import * as os from "os";
+import * as path from "path";
 import { auditExistingFiles } from "../src/lib/docker-audit.ts";
 import {
   classifyCloneError,
+  detectDotnetProject,
   generateDockerfile,
   parseGithubUrl,
 } from "../src/lib/analyzer.ts";
@@ -34,6 +38,8 @@ const baseAnalysis: AnalysisResult = {
   dependencies: ["fastapi"],
   notes: [],
   backendSubdir: "",
+  dotnetProject: "",
+  dotnetSolution: "",
   existingFiles: [],
 };
 
@@ -82,6 +88,67 @@ describe("generateDockerfile", () => {
     assert.match(dockerfile, /find \/app -type f -path '\*\/build\/libs\/\*\.jar'/);
     assert.match(dockerfile, /COPY --from=builder \/app\/application\.jar app\.jar/);
     assert.doesNotMatch(dockerfile, /COPY --from=builder \/app\/build\/libs\/\*\.jar/);
+  });
+
+  it("publishes nested .NET projects from the full repository context", () => {
+    const analysis: AnalysisResult = {
+      ...baseAnalysis,
+      repoName: "DataUtility",
+      language: "csharp",
+      framework: "dotnet",
+      packageManager: "nuget",
+      buildTool: "nuget",
+      entrypoint: "DataUtility.Web.dll",
+      port: 8080,
+      dotnetProject: "src/DataUtility.Web/DataUtility.Web.csproj",
+      dotnetSolution: "DataUtility.sln",
+    };
+    const dockerfile = generateDockerfile(analysis, {});
+
+    assert.match(dockerfile, /COPY \. \./);
+    assert.match(dockerfile, /dotnet restore "DataUtility\.sln"/);
+    assert.match(
+      dockerfile,
+      /dotnet publish "src\/DataUtility\.Web\/DataUtility\.Web\.csproj"/,
+    );
+    assert.match(dockerfile, /ENTRYPOINT \["dotnet", "DataUtility\.Web\.dll"\]/);
+    assert.doesNotMatch(dockerfile, /COPY \*\.csproj/);
+  });
+});
+
+describe("detectDotnetProject", () => {
+  it("prefers web SDK projects in nested solutions", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-dotnet-"));
+    try {
+      const webDir = path.join(root, "src", "DataUtility.Web");
+      const coreDir = path.join(root, "src", "DataUtility.Core");
+      const testsDir = path.join(root, "DataUtility.Tests");
+      await fs.mkdir(webDir, { recursive: true });
+      await fs.mkdir(coreDir, { recursive: true });
+      await fs.mkdir(testsDir, { recursive: true });
+      await fs.writeFile(
+        path.join(root, "DataUtility.sln"),
+        "Microsoft Visual Studio Solution File",
+      );
+      await fs.writeFile(
+        path.join(webDir, "DataUtility.Web.csproj"),
+        '<Project Sdk="Microsoft.NET.Sdk.Web"></Project>',
+      );
+      await fs.writeFile(
+        path.join(coreDir, "DataUtility.Core.csproj"),
+        '<Project Sdk="Microsoft.NET.Sdk"></Project>',
+      );
+      await fs.writeFile(
+        path.join(testsDir, "DataUtility.Tests.csproj"),
+        '<Project Sdk="Microsoft.NET.Sdk"><OutputType>Exe</OutputType></Project>',
+      );
+
+      const detected = await detectDotnetProject(root, "DataUtility");
+      assert.equal(detected.project, "src/DataUtility.Web/DataUtility.Web.csproj");
+      assert.equal(detected.solution, "DataUtility.sln");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 });
 
