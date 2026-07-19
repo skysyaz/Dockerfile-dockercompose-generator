@@ -7,6 +7,7 @@ import { auditExistingFiles } from "../src/lib/docker-audit.ts";
 import {
   classifyCloneError,
   detectDotnetProject,
+  detectDotnetSdkVersion,
   generateDockerfile,
   parseGithubUrl,
 } from "../src/lib/analyzer.ts";
@@ -40,6 +41,7 @@ const baseAnalysis: AnalysisResult = {
   backendSubdir: "",
   dotnetProject: "",
   dotnetSolution: "",
+  dotnetSdkVersion: "",
   envVars: [],
   existingFiles: [],
 };
@@ -103,8 +105,12 @@ describe("generateDockerfile", () => {
       port: 8080,
       dotnetProject: "src/DataUtility.Web/DataUtility.Web.csproj",
       dotnetSolution: "DataUtility.sln",
+      dotnetSdkVersion: "6.0",
     };
     const dockerfile = generateDockerfile(analysis, {});
+
+    assert.match(dockerfile, /FROM mcr\.microsoft\.com\/dotnet\/sdk:6\.0/);
+    assert.match(dockerfile, /FROM mcr\.microsoft\.com\/dotnet\/aspnet:6\.0/);
 
     assert.match(dockerfile, /COPY \. \./);
     assert.match(dockerfile, /dotnet restore "DataUtility\.sln"/);
@@ -129,7 +135,11 @@ describe("detectDotnetProject", () => {
       await fs.mkdir(testsDir, { recursive: true });
       await fs.writeFile(
         path.join(root, "DataUtility.sln"),
-        "Microsoft Visual Studio Solution File",
+        'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataUtility.Web", "src\\DataUtility.Web\\DataUtility.Web.csproj", "{GUID}"\n',
+      );
+      await fs.writeFile(
+        path.join(root, "Hangfire.sln"),
+        'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hangfire", "vendor\\Hangfire\\Hangfire.csproj", "{GUID}"\n',
       );
       await fs.writeFile(
         path.join(webDir, "DataUtility.Web.csproj"),
@@ -147,6 +157,52 @@ describe("detectDotnetProject", () => {
       const detected = await detectDotnetProject(root, "DataUtility");
       assert.equal(detected.project, "src/DataUtility.Web/DataUtility.Web.csproj");
       assert.equal(detected.solution, "DataUtility.sln");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores vendored solution files like Hangfire.sln", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-dotnet-"));
+    try {
+      const webDir = path.join(root, "src", "DataUtility.Web");
+      await fs.mkdir(webDir, { recursive: true });
+      await fs.writeFile(
+        path.join(root, "global.json"),
+        JSON.stringify({ sdk: { version: "6.0.0" } }),
+      );
+      await fs.writeFile(
+        path.join(root, "DataUtility.sln"),
+        'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataUtility.Web", "src\\DataUtility.Web\\DataUtility.Web.csproj", "{GUID}"\n',
+      );
+      await fs.writeFile(
+        path.join(root, "Hangfire.sln"),
+        'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Hangfire", "vendor\\Hangfire\\Hangfire.csproj", "{GUID}"\n',
+      );
+      await fs.writeFile(
+        path.join(webDir, "DataUtility.Web.csproj"),
+        '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net6.0</TargetFramework></PropertyGroup></Project>',
+      );
+
+      const detected = await detectDotnetProject(root, "DataUtility");
+      assert.equal(detected.solution, "DataUtility.sln");
+      assert.equal(detected.sdkVersion, "6.0");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("detectDotnetSdkVersion", () => {
+  it("reads SDK version from global.json", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-dotnet-sdk-"));
+    try {
+      await fs.writeFile(
+        path.join(root, "global.json"),
+        JSON.stringify({ sdk: { version: "6.0.0" } }),
+      );
+      const version = await detectDotnetSdkVersion(root, "App.csproj");
+      assert.equal(version, "6.0");
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }

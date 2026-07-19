@@ -108,6 +108,7 @@ export interface AnalysisResult {
   backendSubdir: string;
   dotnetProject: string;
   dotnetSolution: string;
+  dotnetSdkVersion: string;
   envVars: DiscoveredEnvVar[];
   existingFiles: string[];
   auditFixes?: string[];

@@ -277,13 +277,97 @@ async function scoreCsproj(csprojPath: string, repoName: string): Promise<number
   return score;
 }
 
+function normalizeDotnetVersion(version: string): string {
+  const parts = version.trim().split(".");
+  if (parts.length >= 2) return `${parts[0]}.${parts[1]}`;
+  return version.trim();
+}
+
+const VENDORED_SOLUTION_HINTS =
+  /hangfire|nunit|xunit|moq|serilog|newtonsoft|automapper|castle|fluentvalidation/i;
+
+async function pickDotnetSolution(
+  workDir: string,
+  projectRel: string,
+  repoName: string,
+): Promise<string> {
+  const slns = await globFiles(workDir, "*.sln", 0);
+  if (!slns.length) return "";
+
+  const projectName = path.basename(projectRel);
+  const projectPathWin = projectRel.replace(/\//g, "\\");
+
+  const scored = await Promise.all(
+    slns.map(async (absPath) => {
+      const rel = toPosixRelative(workDir, absPath);
+      const name = path.basename(absPath);
+      const content = await readText(absPath);
+      const containsProject =
+        content.includes(projectRel) ||
+        content.includes(projectPathWin) ||
+        content.includes(`"${projectName}"`) ||
+        content.includes(projectName);
+
+      let score = 0;
+      if (containsProject) score += 100;
+      const lower = name.toLowerCase();
+      const repoLower = repoName.toLowerCase();
+      if (lower.includes(repoLower)) score += 50;
+      if (lower === `${repoLower}.sln`) score += 30;
+      if (VENDORED_SOLUTION_HINTS.test(lower) && !lower.includes(repoLower)) {
+        score -= 80;
+      }
+      score -= rel.split("/").length;
+      return { rel, score };
+    }),
+  );
+
+  scored.sort((a, b) => b.score - a.score);
+  return scored[0]?.rel ?? "";
+}
+
+export async function detectDotnetSdkVersion(
+  workDir: string,
+  projectRel: string,
+): Promise<string> {
+  const globalJson = await readText(path.join(workDir, "global.json"));
+  if (globalJson) {
+    try {
+      const parsed = JSON.parse(globalJson) as { sdk?: { version?: string } };
+      if (parsed.sdk?.version) {
+        return normalizeDotnetVersion(parsed.sdk.version);
+      }
+    } catch {
+      /* ignore invalid global.json */
+    }
+  }
+
+  const csprojPath = path.join(workDir, projectRel);
+  const csproj = await readText(csprojPath);
+  const tfmMatch =
+    csproj.match(/<TargetFramework>\s*(net\d+\.\d+)/i) ??
+    csproj.match(/<TargetFrameworks>\s*([^<]+)</i);
+  if (tfmMatch) {
+    const tfm = tfmMatch[1].split(";")[0].trim();
+    const version = tfm.match(/net(\d+\.\d+)/i);
+    if (version) return version[1];
+  }
+
+  return "8.0";
+}
+
 export async function detectDotnetProject(
   workDir: string,
   repoName: string,
-): Promise<{ project: string; solution: string }> {
+): Promise<{ project: string; solution: string; sdkVersion: string }> {
   const csprojs = await globFiles(workDir, "*.csproj", 0);
   if (!csprojs.length) {
-    return { project: `${repoName}.csproj`, solution: "" };
+    const fallbackProject = `${repoName}.csproj`;
+    return {
+      project: fallbackProject,
+      solution: "",
+      sdkVersion: await detectDotnetSdkVersion(workDir, fallbackProject),
+    };
   }
 
   const ranked = await Promise.all(
@@ -299,19 +383,10 @@ export async function detectDotnetProject(
 
   ranked.sort((a, b) => b.score - a.score);
   const project = ranked[0]?.rel ?? `${repoName}.csproj`;
+  const solution = await pickDotnetSolution(workDir, project, repoName);
+  const sdkVersion = await detectDotnetSdkVersion(workDir, project);
 
-  const rootEntries = await fs.readdir(workDir, { withFileTypes: true });
-  const rootSlns = rootEntries
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".sln"))
-    .map((entry) => entry.name);
-  const solution =
-    rootSlns.length === 1
-      ? rootSlns[0]
-      : rootSlns.find((name) => name.toLowerCase().includes(repoName.toLowerCase())) ??
-        rootSlns[0] ??
-        "";
-
-  return { project, solution };
+  return { project, solution, sdkVersion };
 }
 
 function detectPackageManager(root: string, files: string[]): string {
@@ -923,7 +998,7 @@ export async function analyzeDirectory(
   const dotnet =
     detection.framework === "dotnet"
       ? await detectDotnetProject(workDir, repoName)
-      : { project: "", solution: "" };
+      : { project: "", solution: "", sdkVersion: "" };
 
   if (backendSubdir) {
     detection.notes.push(`Monorepo detected — using subdirectory: ${backendSubdir}`);
@@ -933,10 +1008,12 @@ export async function analyzeDirectory(
     detection.entrypoint = `${path.basename(dotnet.project, ".csproj")}.dll`;
     if (dotnet.solution) {
       detection.notes.push(
-        `Detected .NET solution ${dotnet.solution} with entry project ${dotnet.project}.`,
+        `Detected .NET SDK ${dotnet.sdkVersion} with solution ${dotnet.solution} and entry project ${dotnet.project}.`,
       );
     } else {
-      detection.notes.push(`Detected .NET entry project ${dotnet.project}.`);
+      detection.notes.push(
+        `Detected .NET SDK ${dotnet.sdkVersion} with entry project ${dotnet.project}.`,
+      );
     }
   }
 
@@ -977,6 +1054,7 @@ export async function analyzeDirectory(
     backendSubdir,
     dotnetProject: dotnet.project,
     dotnetSolution: dotnet.solution,
+    dotnetSdkVersion: dotnet.sdkVersion,
     envVars,
     existingFiles,
   };
@@ -1041,7 +1119,9 @@ export function generateDockerfile(
   analysis: AnalysisResult,
   customizations: Customizations = {},
 ): string {
-  const v = customizations.baseImageVersion;
+  const v =
+    customizations.baseImageVersion ??
+    (analysis.framework === "dotnet" ? analysis.dotnetSdkVersion : undefined);
   const images = getBaseImage(analysis.framework, analysis.language, v);
   const repo = analysis.repoName;
 

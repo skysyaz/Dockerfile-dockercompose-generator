@@ -109,6 +109,7 @@ describe("buildEffectiveEnvVars", () => {
     backendSubdir: "",
     dotnetProject: "src/App/App.csproj",
     dotnetSolution: "App.sln",
+    dotnetSdkVersion: "8.0",
     envVars: [
       {
         key: "ConnectionStrings__DefaultConnection",
