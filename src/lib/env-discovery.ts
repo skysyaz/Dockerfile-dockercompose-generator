@@ -187,6 +187,38 @@ function parseEnvFile(content: string): Array<{ key: string; value: string }> {
   return vars;
 }
 
+export function canonicalEnvKey(key: string): string | null {
+  const normalized = key
+    .split("__")
+    .map((segment) =>
+      segment
+        .trim()
+        .replace(/\./g, "_")
+        .replace(/:/g, "_")
+        .replace(/\s+/g, "_")
+        .replace(/[^A-Za-z0-9_]/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, ""),
+    )
+    .filter(Boolean)
+    .join("__");
+
+  if (!normalized) return null;
+
+  let candidate = normalized;
+  if (/^\d/.test(candidate)) candidate = `ENV_${candidate}`;
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(candidate)) return null;
+  return candidate;
+}
+
+export function formatEnvValue(value: string): string | null {
+  if (value.includes("\n") || value.includes("\r")) return null;
+  if (/[\s"'#\\]/.test(value)) {
+    return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+  }
+  return value;
+}
+
 function flattenJson(
   obj: Record<string, unknown>,
   prefix = "",
@@ -199,7 +231,8 @@ function flattenJson(
         ...flattenJson(value as Record<string, unknown>, envKey),
       );
     } else if (typeof value === "string" || typeof value === "number") {
-      results.push({ key: envKey.replace(/\./g, "__"), value: String(value) });
+      const key = canonicalEnvKey(envKey.replace(/\./g, "__"));
+      if (key) results.push({ key, value: String(value) });
     }
   }
   return results;
@@ -492,15 +525,17 @@ function varsFromParsed(
   priorities: Map<string, number>,
 ): void {
   for (const { key, value } of parsed) {
+    const canonical = canonicalEnvKey(key);
+    if (!canonical) continue;
     upsertVar(
       map,
       {
-        key,
-        suggestedValue: value || placeholderForKey(key),
-        category: categorizeKey(key),
+        key: canonical,
+        suggestedValue: value || placeholderForKey(canonical),
+        category: categorizeKey(canonical),
         source,
-        required: isRequiredKey(key),
-        sensitive: isSensitiveKey(key),
+        required: isRequiredKey(canonical),
+        sensitive: isSensitiveKey(canonical),
         description:
           source === "env-example"
             ? "Found in repository .env example"
@@ -997,8 +1032,12 @@ export function formatEnvFile(
       if (withComments && variable.description) {
         push(`# ${variable.description}`);
       }
-      const value = values[variable.key] ?? variable.suggestedValue;
-      push(`${variable.key}=${value}`);
+      const rawValue = values[variable.key] ?? variable.suggestedValue;
+      const formattedValue = formatEnvValue(rawValue);
+      if (formattedValue === null) continue;
+      const key = canonicalEnvKey(variable.key);
+      if (!key) continue;
+      push(`${key}=${formattedValue}`);
     }
     push("");
   }

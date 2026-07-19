@@ -5,8 +5,10 @@ import * as os from "os";
 import * as path from "path";
 import {
   buildEffectiveEnvVars,
+  canonicalEnvKey,
   discoverEnvVars,
   formatEnvFile,
+  formatEnvValue,
   parseConnectionStringParts,
   resolveComposeServices,
 } from "../src/lib/env-discovery.ts";
@@ -230,7 +232,56 @@ describe("resolveComposeServices", () => {
   });
 });
 
+describe("canonicalEnvKey", () => {
+  it("replaces spaces and invalid characters in appsettings keys", () => {
+    assert.equal(
+      canonicalEnvKey("Logging__LogLevel__Microsoft Hosting Lifetime"),
+      "Logging__LogLevel__Microsoft_Hosting_Lifetime",
+    );
+    assert.equal(
+      canonicalEnvKey("ConnectionStrings__Default Connection"),
+      "ConnectionStrings__Default_Connection",
+    );
+    assert.equal(canonicalEnvKey(""), null);
+  });
+});
+
+describe("formatEnvValue", () => {
+  it("quotes values containing spaces", () => {
+    assert.equal(formatEnvValue("simple"), "simple");
+    assert.equal(formatEnvValue("has spaces"), '"has spaces"');
+    assert.equal(formatEnvValue("line\nbreak"), null);
+  });
+});
+
 describe("formatEnvFile", () => {
+  it("quotes values with spaces and rejects invalid keys", () => {
+    const content = formatEnvFile(
+      [
+        {
+          key: "Logging__LogLevel__Microsoft Hosting Lifetime",
+          suggestedValue: "Information",
+          category: "config",
+          source: "appsettings",
+          required: false,
+        },
+        {
+          key: "DB_PASSWORD",
+          suggestedValue: "has spaces inside",
+          category: "database",
+          source: "appsettings",
+          required: true,
+          sensitive: true,
+        },
+      ],
+      {},
+      false,
+    );
+    assert.match(content, /Logging__LogLevel__Microsoft_Hosting_Lifetime=Information/);
+    assert.doesNotMatch(content, /Microsoft Hosting/);
+    assert.match(content, /DB_PASSWORD="has spaces inside"/);
+  });
+
   it("groups variables by category", () => {
     const content = formatEnvFile(
       [
