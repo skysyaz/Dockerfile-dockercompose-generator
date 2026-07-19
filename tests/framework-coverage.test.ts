@@ -186,6 +186,85 @@ describe("new framework detection", () => {
   });
 });
 
+describe("native node modules and engine versions", () => {
+  it("adds build tools when a workspace package needs node-gyp (open-design case)", async () => {
+    await withFixture(
+      {
+        "package.json": JSON.stringify({
+          name: "open-design",
+          workspaces: ["packages/*"],
+          devDependencies: { vite: "^5.0.0" },
+        }),
+        "pnpm-workspace.yaml": "packages:\n  - packages/*\n",
+        "pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+        "packages/db/package.json": JSON.stringify({
+          name: "@open-design/db",
+          dependencies: { "better-sqlite3": "^12.0.0" },
+        }),
+      },
+      async (dir) => {
+        const analysis = await analyzeDirectory("https://github.com/o/open-design", dir);
+        assert.ok(analysis.dependencies.includes("better-sqlite3"));
+        const dockerfile = generateDockerfile(analysis, {});
+        assert.match(dockerfile, /apk add --no-cache python3 make g\+\+/);
+      },
+    );
+  });
+
+  it("skips build tools for pure-JS projects", async () => {
+    await withFixture(
+      {
+        "package.json": JSON.stringify({
+          name: "api",
+          dependencies: { express: "^4.18.0" },
+        }),
+      },
+      async (dir) => {
+        const analysis = await analyzeDirectory("https://github.com/o/api", dir);
+        assert.doesNotMatch(generateDockerfile(analysis, {}), /python3 make g\+\+/);
+      },
+    );
+  });
+
+  it("uses the engines.node version for the base image", async () => {
+    await withFixture(
+      {
+        "package.json": JSON.stringify({
+          name: "app",
+          engines: { node: "~24" },
+          dependencies: { express: "^4.18.0" },
+        }),
+      },
+      async (dir) => {
+        const analysis = await analyzeDirectory("https://github.com/o/app", dir);
+        assert.equal(analysis.nodeVersion, "24-alpine");
+        assert.match(generateDockerfile(analysis, {}), /FROM node:24-alpine/);
+        // Explicit override still wins.
+        assert.match(
+          generateDockerfile(analysis, { baseImageVersion: "20-alpine" }),
+          /FROM node:20-alpine/,
+        );
+      },
+    );
+  });
+
+  it("notes Electron projects", async () => {
+    await withFixture(
+      {
+        "package.json": JSON.stringify({
+          name: "desktop",
+          dependencies: { vue: "^3.4.0" },
+          devDependencies: { electron: "^30.0.0" },
+        }),
+      },
+      async (dir) => {
+        const analysis = await analyzeDirectory("https://github.com/o/desktop", dir);
+        assert.ok(analysis.notes.some((note) => note.includes("Electron")));
+      },
+    );
+  });
+});
+
 describe("monorepo compose build context", () => {
   it("points the build context at the backend subdirectory", () => {
     const analysis: AnalysisResult = {

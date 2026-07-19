@@ -50,6 +50,38 @@ function emitLog(socket, stream, text) {
   socket.emit("log", { t: Date.now(), stream, text: redactSecrets(text) });
 }
 
+// Recognized failure signatures → actionable hints shown after a failed build.
+const FAILURE_HINTS = [
+  {
+    re: /gyp ERR!|Could not find any Python|node-gyp/i,
+    hint:
+      "Native Node modules need build tools. Re-run Analyze/Generate with the latest DockGen (it adds python3/make/g++ automatically when native modules are detected), or add to the Dockerfile install stage: RUN apk add --no-cache python3 make g++",
+  },
+  {
+    re: /Unsupported engine|EBADENGINE/i,
+    hint:
+      "The repo requires a different Node version — set the base image version (e.g. 24-alpine) in Build Customization, or re-run Analyze (DockGen now reads engines.node automatically).",
+  },
+  {
+    re: /no space left on device/i,
+    hint: "The Docker host is out of disk space — run: docker system prune -af",
+  },
+  {
+    re: /ERR_PNPM_OUTDATED_LOCKFILE|frozen-lockfile/i,
+    hint:
+      "The lockfile is out of sync with package.json — update the lockfile in the repo, or remove --frozen-lockfile from the install command.",
+  },
+  {
+    re: /permission denied while trying to connect to the Docker daemon/i,
+    hint:
+      "The build service cannot reach the Docker socket — check that /var/run/docker.sock is mounted and DOCKER_GID matches the host socket group.",
+  },
+  {
+    re: /net\/http: TLS handshake timeout|context deadline exceeded|dial tcp.*i\/o timeout/i,
+    hint: "Network timeout while pulling images — check the Docker host's connectivity and retry.",
+  },
+];
+
 const httpServer = createServer();
 const io = new Server(httpServer, {
   path: BUILD_SOCKET_PATH,
@@ -166,12 +198,18 @@ io.on("connection", (socket) => {
         env: dockerEnv(),
       });
 
+      const matchedHints = new Set();
       const onData = (stream) => (chunk) => {
         chunk
           .toString()
           .split(/\r?\n/)
           .filter(Boolean)
-          .forEach((line) => log(stream, line));
+          .forEach((line) => {
+            for (const { re, hint } of FAILURE_HINTS) {
+              if (re.test(line)) matchedHints.add(hint);
+            }
+            log(stream, line);
+          });
       };
 
       compose.stdout.on("data", onData("stdout"));
@@ -193,6 +231,12 @@ io.on("connection", (socket) => {
           resolve({ code: null, killed: false });
         });
       });
+
+      if (result.code !== 0 && matchedHints.size) {
+        for (const hint of matchedHints) {
+          log("system", `[hint] ${hint}`);
+        }
+      }
 
       socket.emit("done", {
         success: result.code === 0,

@@ -610,16 +610,42 @@ async function readDependencies(
   if (req) addFromText(req);
 
   const pkg = await readText(path.join(workDir, "package.json"));
+  let isWorkspaceRoot = false;
   if (pkg) {
     try {
       const parsed = JSON.parse(pkg) as {
         dependencies?: Record<string, string>;
         devDependencies?: Record<string, string>;
+        workspaces?: unknown;
       };
       deps.push(...Object.keys(parsed.dependencies ?? {}));
       deps.push(...Object.keys(parsed.devDependencies ?? {}));
+      isWorkspaceRoot = Boolean(parsed.workspaces);
     } catch {
       /* ignore */
+    }
+  }
+
+  // Workspace monorepos keep real dependencies (incl. native modules that
+  // need build tools) in nested package.json files — scan those too.
+  if (
+    isWorkspaceRoot ||
+    (await fileExists(path.join(workDir, "pnpm-workspace.yaml")))
+  ) {
+    const nestedPkgs = (await globFiles(workDir, "*.json", 0, 3)).filter(
+      (f) => path.basename(f) === "package.json" && path.dirname(f) !== workDir,
+    );
+    for (const nested of nestedPkgs.slice(0, 50)) {
+      try {
+        const parsed = JSON.parse(await readText(nested)) as {
+          dependencies?: Record<string, string>;
+          devDependencies?: Record<string, string>;
+        };
+        deps.push(...Object.keys(parsed.dependencies ?? {}));
+        deps.push(...Object.keys(parsed.devDependencies ?? {}));
+      } catch {
+        /* ignore */
+      }
     }
   }
 
@@ -660,7 +686,7 @@ async function readDependencies(
     }
   }
 
-  return deps.slice(0, 100);
+  return [...new Set(deps)].slice(0, 400);
 }
 
 function detectServices(deps: string[]): DetectedService[] {
@@ -1110,6 +1136,12 @@ async function detectFramework(
     const depNames = Object.keys(allDeps).join(" ").toLowerCase();
     const pm = () => detectPackageManager(files, packageManagerField);
 
+    if (allDeps.electron) {
+      notes.push(
+        "Electron dependency detected — the container builds/serves the web part only; the desktop app itself cannot run inside Docker.",
+      );
+    }
+
     if (allDeps.next) {
       notes.push("Detected Next.js — using standalone multi-stage Dockerfile.");
       return {
@@ -1320,10 +1352,19 @@ export async function analyzeDirectory(
   const detection = await detectFramework(workDir);
   const rootFiles = await listRootFiles(workDir);
   let packageManagerField = "";
+  let nodeVersion = "";
   if (rootFiles.includes("package.json")) {
     try {
       const pkg = JSON.parse(await readText(path.join(workDir, "package.json")));
       packageManagerField = String(pkg.packageManager ?? "");
+      const engines = String(pkg.engines?.node ?? "");
+      const major = engines.match(/(\d+)/)?.[1];
+      if (major && Number(major) >= 14 && Number(major) <= 30) {
+        nodeVersion = `${major}-alpine`;
+        detection.notes.push(
+          `Using node:${major}-alpine base image (package.json engines.node: "${engines}").`,
+        );
+      }
     } catch {
       /* ignore */
     }
@@ -1426,6 +1467,7 @@ export async function analyzeDirectory(
     wsgiModule,
     goBuildPath,
     binaryName,
+    nodeVersion,
   };
 }
 
@@ -1447,6 +1489,38 @@ function getBaseImage(
     dotnetAsp: `mcr.microsoft.com/dotnet/aspnet:${version || "8.0"}`,
     jre: `eclipse-temurin:17-jre-alpine`,
   };
+}
+
+const NODE_FRAMEWORKS = new Set<Framework>([
+  "nextjs",
+  "nuxt",
+  "svelte",
+  "express",
+  "nestjs",
+  "nodejs",
+  "react",
+  "vue",
+  "vite",
+  "angular",
+  "astro",
+  "remix",
+  "gatsby",
+  "fastify",
+  "koa",
+  "hono",
+]);
+
+// npm packages that compile native code via node-gyp on install and therefore
+// need python3/make/g++ in the image running the install step.
+const NATIVE_NODE_MODULE_HINTS =
+  /better-sqlite3|\bsqlite3\b|bcrypt(?!js)|argon2|\bcanvas\b|node-sass|serialport|leveldown|classic-level|\bre2\b|zeromq|robotjs|keytar|node-pty|cpu-features|isolated-vm|bufferutil|utf-8-validate|node-rdkafka|couchbase|oracledb|\bsnappy\b|lzma-native|node-libcurl|node-expat|deasync|microtime|\bgrpc\b/i;
+
+function nodeGypLine(analysis: AnalysisResult, nodeImage: string): string {
+  const joined = (analysis.dependencies ?? []).join(" ").toLowerCase();
+  if (!NATIVE_NODE_MODULE_HINTS.test(joined)) return "";
+  return nodeImage.includes("alpine")
+    ? "RUN apk add --no-cache python3 make g++\n"
+    : "RUN apt-get update && apt-get install -y --no-install-recommends \\\n    python3 make g++ && rm -rf /var/lib/apt/lists/*\n";
 }
 
 function pythonDepsBlock(analysis: AnalysisResult, extraPipPackages = ""): string {
@@ -1513,19 +1587,26 @@ export function generateDockerfile(
 ): string {
   const v =
     customizations.baseImageVersion ??
-    (analysis.framework === "dotnet" ? analysis.dotnetSdkVersion : undefined);
+    (analysis.framework === "dotnet"
+      ? analysis.dotnetSdkVersion
+      : NODE_FRAMEWORKS.has(analysis.framework)
+        ? analysis.nodeVersion || undefined
+        : undefined);
   const images = getBaseImage(analysis.framework, analysis.language, v);
   const repo = analysis.repoName;
   const copyDeps = dependencyCopyLine(analysis.rootFiles ?? []);
   const install = installCmd(analysis.packageManager, analysis.rootFiles ?? []);
   const build = buildCmd(analysis.packageManager);
+  const gyp = NODE_FRAMEWORKS.has(analysis.framework)
+    ? nodeGypLine(analysis, images.node)
+    : "";
 
   switch (analysis.framework) {
     case "nextjs":
       return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 
 # Stage 2: Build
@@ -1708,7 +1789,7 @@ ENTRYPOINT ["dotnet", "${dllName}.dll"]
     case "hono":
       return `FROM ${images.node} AS deps
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 
 FROM ${images.node} AS runner
@@ -1728,7 +1809,7 @@ CMD ["npm", "start"]
       return `# Stage 1: Build static assets
 FROM ${images.node} AS builder
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 COPY . .
 ${build}
@@ -1748,7 +1829,7 @@ CMD ["nginx", "-g", "daemon off;"]
         return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 
 # Stage 2: Build
@@ -1774,7 +1855,7 @@ CMD ["node", "./dist/server/entry.mjs"]
       return `# Stage 1: Build static assets
 FROM ${images.node} AS builder
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 COPY . .
 ${build}
@@ -1791,7 +1872,7 @@ CMD ["nginx", "-g", "daemon off;"]
     case "remix":
       return `FROM ${images.node} AS builder
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 COPY . .
 ${build}
@@ -1922,7 +2003,7 @@ CMD ["nginx", "-g", "daemon off;"]
       return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 
 # Stage 2: Build
@@ -1947,7 +2028,7 @@ CMD ["node", ".output/server/index.mjs"]
     case "svelte":
       return `FROM ${images.node} AS builder
 WORKDIR /app
-${copyDeps}
+${gyp}${copyDeps}
 ${install}
 COPY . .
 ${build}

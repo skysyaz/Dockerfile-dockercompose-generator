@@ -136,6 +136,8 @@ export interface AnalysisResult {
   goBuildPath?: string;
   /** Compiled binary name (Rust crate / [[bin]] target). */
   binaryName?: string;
+  /** Node base image tag derived from package.json engines.node, e.g. "24-alpine". */
+  nodeVersion?: string;
 }
 
 export interface Customizations {

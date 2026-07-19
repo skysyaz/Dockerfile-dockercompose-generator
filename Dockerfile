@@ -30,7 +30,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ARG DOCKER_GID=999
-RUN apk add --no-cache docker-cli docker-cli-compose su-exec && \
+RUN apk add --no-cache docker-cli docker-cli-compose docker-cli-buildx su-exec && \
     addgroup -g 1001 -S nodejs && \
     adduser -S nextjs -u 1001 -G nodejs -h /home/nextjs && \
     mkdir -p /home/nextjs/.docker && \
