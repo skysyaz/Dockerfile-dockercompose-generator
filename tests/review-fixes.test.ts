@@ -123,6 +123,25 @@ describe("generateDockerfile", () => {
     assert.match(dockerfile, /ENTRYPOINT \["dotnet", "DataUtility\.Web\.dll"\]/);
     assert.doesNotMatch(dockerfile, /COPY \*\.csproj/);
   });
+
+  it("omits missing lockfiles for pnpm monorepos like open-design", () => {
+    const analysis: AnalysisResult = {
+      ...baseAnalysis,
+      language: "typescript",
+      framework: "nodejs",
+      packageManager: "pnpm",
+      buildTool: "pnpm",
+      entrypoint: "index.js",
+      port: 3000,
+      rootFiles: ["package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml"],
+    };
+    const dockerfile = generateDockerfile(analysis, {});
+
+    assert.match(dockerfile, /COPY package\*\.json pnpm-lock\.yaml \.\//);
+    assert.doesNotMatch(dockerfile, /yarn\.lock/);
+    assert.doesNotMatch(dockerfile, /bun\.lock/);
+    assert.match(dockerfile, /pnpm install --frozen-lockfile/);
+  });
 });
 
 describe("detectDotnetProject", () => {
