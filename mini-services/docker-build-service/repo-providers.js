@@ -73,6 +73,26 @@ export function parseRepoUrl(url) {
   return null;
 }
 
+export function resolveAccessToken(provider, requestToken) {
+  const token = typeof requestToken === "string" ? requestToken.trim() : "";
+  if (token) return token;
+  switch (provider) {
+    case "github":
+      return process.env.GITHUB_TOKEN || undefined;
+    case "gitlab":
+      return process.env.GITLAB_TOKEN || process.env.GITHUB_TOKEN || undefined;
+    case "bitbucket":
+      return process.env.BITBUCKET_TOKEN || undefined;
+    default:
+      return (
+        process.env.GITHUB_TOKEN ||
+        process.env.GITLAB_TOKEN ||
+        process.env.GITEA_TOKEN ||
+        undefined
+      );
+  }
+}
+
 async function extractTarball(response, dest) {
   if (!response.ok) {
     throw new Error(`Archive download failed with status ${response.status}`);
@@ -116,7 +136,32 @@ export async function fetchRepoArchive(repoUrl, dest, accessToken) {
       Accept: "application/vnd.github+json",
       ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
     });
-    if (!res.ok) throw new Error(`GitHub API returned ${res.status}`);
+    if (!res.ok) {
+      if (res.status === 404) {
+        throw new Error(
+          accessToken
+            ? `fatal: repository '${parsed.projectPath}' does not exist or your token cannot access it`
+            : `fatal: repository '${parsed.projectPath}' does not exist. If the repo is private, set GITHUB_TOKEN in the server environment or paste a token in the UI.`,
+        );
+      }
+      if (res.status === 401 || res.status === 403) {
+        const remaining = res.headers.get("x-ratelimit-remaining");
+        const reset = res.headers.get("x-ratelimit-reset");
+        if (remaining === "0" && reset) {
+          const mins = Math.max(
+            1,
+            Math.ceil((parseInt(reset, 10) * 1000 - Date.now()) / 60_000),
+          );
+          throw new Error(
+            `GitHub API rate limit exceeded. Try again in ${mins} minute(s), or provide a token to increase your limit.`,
+          );
+        }
+        throw new Error(
+          `fatal: Authentication failed for https://github.com/${parsed.projectPath}. If the repo is private, provide a valid GitHub token with repo scope.`,
+        );
+      }
+      throw new Error(`GitHub API returned ${res.status}`);
+    }
     await extractTarball(res, dest);
     return;
   }

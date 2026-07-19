@@ -20,5 +20,8 @@ services:
       - BUILD_SERVICE_TOKEN=${BUILD_SERVICE_TOKEN:-}
       - BUILD_SERVICE_ORIGINS=${BUILD_SERVICE_ORIGINS:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GITLAB_TOKEN=${GITLAB_TOKEN:-}
+      - BITBUCKET_TOKEN=${BITBUCKET_TOKEN:-}
+      - GITEA_TOKEN=${GITEA_TOKEN:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock

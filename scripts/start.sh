@@ -31,7 +31,13 @@ run_as_nextjs() {
 }
 
 echo "[dockgen] starting docker-build service on port ${BUILD_PORT}..."
-run_as_nextjs sh -c "cd /mini-services/docker-build-service && BUILD_SERVICE_PORT=${BUILD_PORT} node index.js" &
+run_as_nextjs sh -c "cd /mini-services/docker-build-service && \
+  BUILD_SERVICE_PORT=${BUILD_PORT} \
+  GITHUB_TOKEN=\"${GITHUB_TOKEN:-}\" \
+  GITLAB_TOKEN=\"${GITLAB_TOKEN:-}\" \
+  BITBUCKET_TOKEN=\"${BITBUCKET_TOKEN:-}\" \
+  GITEA_TOKEN=\"${GITEA_TOKEN:-}\" \
+  node index.js" &
 
 echo "[dockgen] starting Next.js app on internal port ${APP_PORT}..."
 run_as_nextjs sh -c "cd /app && PORT=${APP_PORT} HOSTNAME=127.0.0.1 node server.js" &

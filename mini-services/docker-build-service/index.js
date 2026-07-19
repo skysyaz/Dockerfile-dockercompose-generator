@@ -5,7 +5,7 @@ import * as path from "path";
 import * as os from "os";
 import { Server } from "socket.io";
 import { dockerEnv, resolveComposeCommand } from "./compose.js";
-import { fetchRepoArchive } from "./repo-providers.js";
+import { fetchRepoArchive, parseRepoUrl, resolveAccessToken } from "./repo-providers.js";
 
 const PORT = Number(process.env.BUILD_SERVICE_PORT || 5173);
 const BUILD_TOKEN = process.env.BUILD_SERVICE_TOKEN || "";
@@ -130,7 +130,9 @@ io.on("connection", (socket) => {
       if (cloneRepo !== false) {
         log("system", `[fetch] downloading tarball for ${repoUrl}`);
         try {
-          await fetchRepoArchive(repoUrl, workDir, githubToken);
+          const parsed = parseRepoUrl(repoUrl);
+          const accessToken = resolveAccessToken(parsed?.provider, githubToken);
+          await fetchRepoArchive(repoUrl, workDir, accessToken);
           log("system", "[fetch] done");
         } catch (error) {
           log("stderr", error instanceof Error ? error.message : String(error));

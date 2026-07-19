@@ -8,5 +8,11 @@ export async function GET() {
       { status: 503 },
     );
   }
-  return NextResponse.json({ token });
+  const serverTokenConfigured = Boolean(
+    process.env.GITHUB_TOKEN ||
+      process.env.GITLAB_TOKEN ||
+      process.env.BITBUCKET_TOKEN ||
+      process.env.GITEA_TOKEN,
+  );
+  return NextResponse.json({ token, serverTokenConfigured });
 }

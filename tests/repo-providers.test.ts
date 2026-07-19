@@ -11,6 +11,7 @@ describe("parseRepoUrl", () => {
       repoName: "r",
     });
     assert.deepEqual(parseRepoUrl("https://github.com/o/r.git")?.repoName, "r");
+    assert.equal(parseRepoUrl("https://github.com/o/r/tree/main")?.projectPath, "o/r");
   });
 
   it("parses GitLab URLs including nested groups", () => {
