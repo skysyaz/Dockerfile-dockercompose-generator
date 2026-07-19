@@ -191,6 +191,28 @@ describe("detectDotnetProject", () => {
       await fs.rm(root, { recursive: true, force: true });
     }
   });
+
+  it("discovers projects from solution files when csproj glob misses them", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-dotnet-sln-"));
+    try {
+      const deepDir = path.join(root, "a", "b", "c", "d", "e", "f", "g", "h", "i");
+      await fs.mkdir(deepDir, { recursive: true });
+      await fs.writeFile(
+        path.join(root, "DataUtility.sln"),
+        'Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataUtility.Web", "a\\b\\c\\d\\e\\f\\g\\h\\i\\DataUtility.Web.csproj", "{GUID}"\n',
+      );
+      await fs.writeFile(
+        path.join(deepDir, "DataUtility.Web.csproj"),
+        '<Project Sdk="Microsoft.NET.Sdk.Web"><PropertyGroup><TargetFramework>net6.0</TargetFramework></PropertyGroup></Project>',
+      );
+
+      const detected = await detectDotnetProject(root, "DataUtility");
+      assert.equal(detected.project, "a/b/c/d/e/f/g/h/i/DataUtility.Web.csproj");
+      assert.equal(detected.solution, "DataUtility.sln");
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("detectDotnetSdkVersion", () => {

@@ -205,6 +205,178 @@ function flattenJson(
   return results;
 }
 
+export function parseConnectionStringParts(
+  connection: string,
+): Record<string, string> {
+  const parts: Record<string, string> = {};
+  const trimmed = connection.trim();
+  if (!trimmed) return parts;
+
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+    try {
+      const url = new URL(trimmed);
+      parts.host = url.hostname;
+      if (url.port) parts.port = url.port;
+      parts.database = decodeURIComponent(url.pathname.replace(/^\//, ""));
+      if (url.username) parts.username = decodeURIComponent(url.username);
+      if (url.password) parts.password = decodeURIComponent(url.password);
+      return parts;
+    } catch {
+      /* fall through to key=value parsing */
+    }
+  }
+
+  for (const segment of trimmed.split(";")) {
+    const eq = segment.indexOf("=");
+    if (eq === -1) continue;
+    const key = segment.slice(0, eq).trim().toLowerCase();
+    const value = segment.slice(eq + 1).trim();
+    if (!value) continue;
+
+    if (key === "server" || key === "host" || key === "data source" || key === "addr") {
+      const [host, port] = value.split(",");
+      parts.host = host.trim();
+      if (port?.trim() && /^\d+$/.test(port.trim())) parts.port = port.trim();
+      continue;
+    }
+    if (key === "port") parts.port = value;
+    if (key === "database" || key === "initial catalog" || key === "dbname") {
+      parts.database = value;
+    }
+    if (
+      key === "user id" ||
+      key === "userid" ||
+      key === "user" ||
+      key === "username" ||
+      key === "uid"
+    ) {
+      parts.username = value;
+    }
+    if (key === "password" || key === "pwd") parts.password = value;
+  }
+
+  return parts;
+}
+
+const DB_FIELD_MAP: Record<string, string> = {
+  host: "DB_HOST",
+  hostname: "DB_HOST",
+  server: "DB_HOST",
+  port: "DB_PORT",
+  database: "DB_NAME",
+  dbname: "DB_NAME",
+  name: "DB_NAME",
+  username: "DB_USER",
+  user: "DB_USER",
+  userid: "DB_USER",
+  password: "DB_PASSWORD",
+  pwd: "DB_PASSWORD",
+};
+
+function expandDatabaseConfigFromAppsettings(
+  flattened: Array<{ key: string; value: string }>,
+  sourceFile: string,
+): DiscoveredEnvVar[] {
+  const vars: DiscoveredEnvVar[] = [];
+  const fileLabel = path.basename(sourceFile);
+  const seen = new Set<string>();
+
+  const addVar = (
+    envKey: string,
+    value: string,
+    description: string,
+    sensitive = false,
+  ) => {
+    if (!value || seen.has(envKey)) return;
+    seen.add(envKey);
+    vars.push({
+      key: envKey,
+      suggestedValue: value,
+      category: "database",
+      source: "appsettings",
+      required: true,
+      sensitive,
+      description,
+    });
+  };
+
+  for (const { key, value } of flattened) {
+    const isConnection =
+      /connectionstrings__/i.test(key) ||
+      key.toLowerCase() === "connectionstring";
+    if (!isConnection || !value || /^[\${]|^#\{/i.test(value)) continue;
+
+    const parts = parseConnectionStringParts(value);
+    addVar("DB_HOST", parts.host ?? "", `Host from ${fileLabel} (${key})`);
+    addVar("DB_PORT", parts.port ?? "", `Port from ${fileLabel} (${key})`);
+    addVar("DB_NAME", parts.database ?? "", `Database from ${fileLabel} (${key})`);
+    addVar("DB_USER", parts.username ?? "", `Username from ${fileLabel} (${key})`);
+    addVar(
+      "DB_PASSWORD",
+      parts.password ?? "",
+      `Password from ${fileLabel} (${key})`,
+      true,
+    );
+  }
+
+  for (const { key, value } of flattened) {
+    if (!value) continue;
+    const segments = key.split("__");
+    const field = segments[segments.length - 1]?.toLowerCase() ?? "";
+    const section = segments.slice(0, -1).join("__").toLowerCase();
+    if (!/database|datasource|connectionstring|db|postgres|mysql|mongo/i.test(`${section}__${field}`)) {
+      continue;
+    }
+    const envKey = DB_FIELD_MAP[field];
+    if (!envKey) continue;
+    addVar(
+      envKey,
+      value,
+      `From ${fileLabel} (${key})`,
+      /password|secret|pwd/i.test(field),
+    );
+  }
+
+  return vars;
+}
+
+async function globAppsettingsFiles(
+  workDir: string,
+  dotnetProject?: string,
+  depth = 0,
+): Promise<string[]> {
+  const CONFIG_GLOB_MAX_DEPTH = 8;
+  if (depth > CONFIG_GLOB_MAX_DEPTH) return [];
+
+  const found: string[] = [];
+  if (dotnetProject && depth === 0) {
+    const projectDir = path.join(workDir, path.dirname(dotnetProject));
+    try {
+      const entries = await fs.readdir(projectDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && /^appsettings.*\.json$/i.test(entry.name)) {
+          found.push(path.join(projectDir, entry.name));
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  const entries = await fs.readdir(workDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (SKIP_DIRS.has(entry.name)) continue;
+    const full = path.join(workDir, entry.name);
+    if (entry.isFile() && /^appsettings.*\.json$/i.test(entry.name)) {
+      found.push(full);
+    } else if (entry.isDirectory()) {
+      found.push(...(await globAppsettingsFiles(full, undefined, depth + 1)));
+    }
+  }
+
+  return [...new Set(found)];
+}
+
 function parseProperties(content: string): Array<{ key: string; value: string }> {
   const vars: Array<{ key: string; value: string }> = [];
   for (const line of content.split(/\r?\n/)) {
@@ -842,6 +1014,7 @@ export async function discoverEnvVars(
     repoName: string;
     port: number;
     databaseMode?: DatabaseMode;
+    dotnetProject?: string;
   },
 ): Promise<DiscoveredEnvVar[]> {
   const map = new Map<string, DiscoveredEnvVar>();
@@ -854,37 +1027,24 @@ export async function discoverEnvVars(
     varsFromParsed(parseEnvFile(content), "env-example", 100, map, priorities);
   }
 
-  const appsettings = await readText(path.join(workDir, "appsettings.json"));
-  if (appsettings) {
+  for (const appsettingsPath of await globAppsettingsFiles(
+    workDir,
+    options.dotnetProject,
+  )) {
+    const content = await readText(appsettingsPath);
+    if (!content) continue;
     try {
-      const parsed = JSON.parse(appsettings) as Record<string, unknown>;
-      varsFromParsed(
-        flattenJson(parsed),
-        "appsettings",
-        90,
-        map,
-        priorities,
-      );
+      const parsed = JSON.parse(content) as Record<string, unknown>;
+      const flattened = flattenJson(parsed);
+      varsFromParsed(flattened, "appsettings", 90, map, priorities);
+      for (const variable of expandDatabaseConfigFromAppsettings(
+        flattened,
+        appsettingsPath,
+      )) {
+        upsertVar(map, variable, 95, priorities);
+      }
     } catch {
       /* ignore invalid json */
-    }
-  }
-
-  const appsettingsDev = await readText(
-    path.join(workDir, "appsettings.Development.json"),
-  );
-  if (appsettingsDev) {
-    try {
-      const parsed = JSON.parse(appsettingsDev) as Record<string, unknown>;
-      varsFromParsed(
-        flattenJson(parsed),
-        "appsettings",
-        85,
-        map,
-        priorities,
-      );
-    } catch {
-      /* ignore */
     }
   }
 

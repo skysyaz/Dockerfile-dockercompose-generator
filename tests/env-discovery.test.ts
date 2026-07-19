@@ -7,6 +7,7 @@ import {
   buildEffectiveEnvVars,
   discoverEnvVars,
   formatEnvFile,
+  parseConnectionStringParts,
   resolveComposeServices,
 } from "../src/lib/env-discovery.ts";
 import type { AnalysisResult } from "../src/lib/types.ts";
@@ -22,6 +23,30 @@ const postgresService = {
   ports: ["5432:5432"],
   volumes: ["postgres_data:/var/lib/postgresql/data"],
 };
+
+describe("parseConnectionStringParts", () => {
+  it("parses ADO.NET connection strings into host and credentials", () => {
+    const parts = parseConnectionStringParts(
+      "Server=192.168.1.50;Port=5432;Database=datautility;User Id=appuser;Password=secret;",
+    );
+    assert.equal(parts.host, "192.168.1.50");
+    assert.equal(parts.port, "5432");
+    assert.equal(parts.database, "datautility");
+    assert.equal(parts.username, "appuser");
+    assert.equal(parts.password, "secret");
+  });
+
+  it("parses URI-style database URLs", () => {
+    const parts = parseConnectionStringParts(
+      "postgresql://appuser:secret@10.0.0.8:5432/datautility",
+    );
+    assert.equal(parts.host, "10.0.0.8");
+    assert.equal(parts.port, "5432");
+    assert.equal(parts.database, "datautility");
+    assert.equal(parts.username, "appuser");
+    assert.equal(parts.password, "secret");
+  });
+});
 
 describe("discoverEnvVars", () => {
   it("reads repository .env.example files", async () => {
@@ -64,6 +89,42 @@ describe("discoverEnvVars", () => {
       });
       assert.ok(
         vars.some((variable) => variable.key === "ConnectionStrings__DefaultConnection"),
+      );
+      assert.ok(vars.some((variable) => variable.key === "DB_HOST"));
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("reads nested appsettings and expands database credentials", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-env-nested-"));
+    try {
+      const webDir = path.join(root, "src", "DataUtility.Web");
+      await fs.mkdir(webDir, { recursive: true });
+      await fs.writeFile(
+        path.join(webDir, "appsettings.json"),
+        JSON.stringify({
+          ConnectionStrings: {
+            DefaultConnection:
+              "Server=192.168.1.50;Port=5432;Database=datautility;User Id=appuser;Password=secret;",
+          },
+        }),
+      );
+      const vars = await discoverEnvVars(root, {
+        framework: "dotnet",
+        services: [],
+        repoName: "DataUtility",
+        port: 8080,
+        dotnetProject: "src/DataUtility.Web/DataUtility.Web.csproj",
+      });
+      assert.ok(vars.some((variable) => variable.key === "DB_HOST"));
+      assert.ok(vars.some((variable) => variable.key === "DB_PASSWORD" && variable.sensitive));
+      assert.ok(
+        vars.some(
+          (variable) =>
+            variable.key === "ConnectionStrings__DefaultConnection" &&
+            variable.suggestedValue.includes("192.168.1.50"),
+        ),
       );
     } finally {
       await fs.rm(root, { recursive: true, force: true });

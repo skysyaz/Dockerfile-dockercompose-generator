@@ -61,6 +61,7 @@ const BACKEND_MARKERS = [
 ];
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
+const GLOB_MAX_DEPTH = 8;
 
 interface CacheEntry {
   dir: string;
@@ -233,8 +234,9 @@ async function globFiles(
   dir: string,
   pattern: string,
   depth: number,
+  maxDepth = GLOB_MAX_DEPTH,
 ): Promise<string[]> {
-  if (depth > 3) return [];
+  if (depth > maxDepth) return [];
   const suffix = pattern.startsWith("*.") ? pattern.slice(1) : null;
   const results: string[] = [];
   const entries = await fs.readdir(dir, { withFileTypes: true });
@@ -246,7 +248,7 @@ async function globFiles(
         results.push(full);
       }
     } else if (entry.isDirectory()) {
-      results.push(...(await globFiles(full, pattern, depth + 1)));
+      results.push(...(await globFiles(full, pattern, depth + 1, maxDepth)));
     }
   }
   return results;
@@ -326,6 +328,24 @@ async function pickDotnetSolution(
   return scored[0]?.rel ?? "";
 }
 
+async function findCsprojsFromSolutions(workDir: string): Promise<string[]> {
+  const slns = await globFiles(workDir, "*.sln", 0);
+  const found = new Set<string>();
+
+  for (const slnPath of slns) {
+    const content = await readText(slnPath);
+    for (const match of content.matchAll(/"([^"]+\.csproj)"/gi)) {
+      const projectPath = match[1].replace(/\\/g, "/");
+      const abs = path.resolve(path.dirname(slnPath), projectPath);
+      if (await fileExists(abs)) {
+        found.add(toPosixRelative(workDir, abs));
+      }
+    }
+  }
+
+  return [...found];
+}
+
 export async function detectDotnetSdkVersion(
   workDir: string,
   projectRel: string,
@@ -360,7 +380,12 @@ export async function detectDotnetProject(
   workDir: string,
   repoName: string,
 ): Promise<{ project: string; solution: string; sdkVersion: string }> {
-  const csprojs = await globFiles(workDir, "*.csproj", 0);
+  let csprojs = await globFiles(workDir, "*.csproj", 0);
+  if (!csprojs.length) {
+    const fromSolutions = await findCsprojsFromSolutions(workDir);
+    csprojs = fromSolutions.map((rel) => path.join(workDir, rel));
+  }
+
   if (!csprojs.length) {
     const fallbackProject = `${repoName}.csproj`;
     return {
@@ -836,7 +861,8 @@ async function detectFramework(
   }
 
   const csprojs = await globFiles(workDir, "*.csproj", 0);
-  if (csprojs.length || has(".sln") || files.some((f) => f.endsWith(".sln"))) {
+  const slns = await globFiles(workDir, "*.sln", 0);
+  if (csprojs.length || slns.length || has(".sln") || files.some((f) => f.endsWith(".sln"))) {
     return {
       framework: "dotnet",
       language: "csharp",
@@ -1029,6 +1055,7 @@ export async function analyzeDirectory(
     repoName,
     port: detection.port,
     databaseMode: "bundled",
+    dotnetProject: dotnet.project,
   });
 
   if (envVars.length) {
