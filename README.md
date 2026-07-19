@@ -15,10 +15,24 @@ A web application that analyzes GitHub repositories and generates tailored `Dock
 ### Run with Docker (recommended)
 
 ```bash
-docker compose up --build
+cp .env.example .env
+docker compose up --build -d
 ```
 
-Open [http://localhost:8000](http://localhost:8000).
+Open [http://localhost:5173](http://localhost:5173).
+
+### Deploy on Dokploy
+
+1. Create a new **Docker Compose** application in Dokploy.
+2. Point it at this repository (or upload the project).
+3. Set the compose file to `docker-compose.yml`.
+4. Add environment variables from `.env.example`:
+   - `PORT=5173`
+   - `PYTHONUNBUFFERED=1`
+5. In Dokploy, set the **container port** to `5173`.
+6. Deploy the service.
+
+The app runs as a single container: the React frontend is built into the image and served by FastAPI on port `5173`.
 
 ### Run locally for development
 
