@@ -182,6 +182,7 @@ describe("buildEffectiveEnvVars", () => {
         required: true,
       },
     ],
+    rootFiles: [],
     existingFiles: [],
   };
 

@@ -18,6 +18,7 @@ import {
   sanitizePort,
 } from "../src/lib/validation.ts";
 import type { AnalysisResult } from "../src/lib/types.ts";
+import { dependencyCopyLine, installCmd } from "../src/lib/node-docker.ts";
 
 const baseAnalysis: AnalysisResult = {
   repoUrl: "https://github.com/user/app",
@@ -43,6 +44,7 @@ const baseAnalysis: AnalysisResult = {
   dotnetSolution: "",
   dotnetSdkVersion: "",
   envVars: [],
+  rootFiles: [],
   existingFiles: [],
 };
 
@@ -231,6 +233,30 @@ describe("detectDotnetSdkVersion", () => {
   });
 });
 
+describe("node-docker lockfile handling", () => {
+  it("only copies lockfiles that exist in the repository", () => {
+    assert.equal(
+      dependencyCopyLine(["package.json", "bun.lockb"]),
+      "COPY package*.json bun.lockb ./",
+    );
+    assert.equal(dependencyCopyLine(["package.json"]), "COPY package*.json ./");
+    assert.equal(
+      dependencyCopyLine(["package.json", "package-lock.json"]),
+      "COPY package*.json package-lock.json ./",
+    );
+  });
+
+  it("skips frozen lockfile install when no lockfile is present", () => {
+    assert.equal(installCmd("bun", []), "RUN npm i -g bun && bun install");
+    assert.equal(
+      installCmd("bun", ["bun.lockb"]),
+      "RUN npm i -g bun && bun install --frozen-lockfile",
+    );
+    assert.equal(installCmd("npm", []), "RUN npm install");
+    assert.equal(installCmd("npm", ["package-lock.json"]), "RUN npm ci");
+  });
+});
+
 describe("auditExistingFiles", () => {
   it("only rewrites app service ports in compose", () => {
     const existing = {
@@ -255,6 +281,36 @@ describe("auditExistingFiles", () => {
     const result = auditExistingFiles(existing, generated, baseAnalysis, { port: 8080 });
     assert.match(result.files["docker-compose.yml"], /8080:8080/);
     assert.match(result.files["docker-compose.yml"], /5432:5432/);
+  });
+
+  it("rewrites dependency COPY to drop missing lockfiles", () => {
+    const existing = {
+      Dockerfile: `FROM node:20-slim
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN npm i -g bun && bun install --frozen-lockfile
+`,
+    };
+    const generated = {
+      Dockerfile: "FROM node:20-alpine\n",
+      "docker-compose.yml": "services:\n  app:\n    build: .\n",
+      ".dockerignore": "node_modules\n",
+      ".env.example": "",
+    };
+    const analysis: AnalysisResult = {
+      ...baseAnalysis,
+      language: "javascript",
+      framework: "vite",
+      packageManager: "bun",
+      rootFiles: ["package.json", "bun.lockb"],
+    };
+
+    const result = auditExistingFiles(existing, generated, analysis, {});
+    assert.match(result.files.Dockerfile, /COPY package\*\.json bun\.lockb \.\//);
+    assert.doesNotMatch(result.files.Dockerfile, /bun\.lock[^b]/);
+    assert.ok(
+      result.fixes.some((fix) => fix.includes("dependency COPY")),
+    );
   });
 
   it("falls back to generated Dockerfile when existing is incomplete", () => {

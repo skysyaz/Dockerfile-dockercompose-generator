@@ -110,6 +110,7 @@ export interface AnalysisResult {
   dotnetSolution: string;
   dotnetSdkVersion: string;
   envVars: DiscoveredEnvVar[];
+  rootFiles: string[];
   existingFiles: string[];
   auditFixes?: string[];
 }

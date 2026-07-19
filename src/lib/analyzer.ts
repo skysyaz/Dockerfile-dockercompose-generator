@@ -9,6 +9,7 @@ import {
   resolveComposeServices,
 } from "./env-discovery";
 import { fetchRepoArchive } from "./repo-fetch";
+import { buildCmd, dependencyCopyLine, installCmd } from "./node-docker";
 import { parseGithubUrl, parseRepoUrl } from "./repo-url";
 import type {
   AnalysisResult,
@@ -1083,6 +1084,7 @@ export async function analyzeDirectory(
     dotnetSolution: dotnet.solution,
     dotnetSdkVersion: dotnet.sdkVersion,
     envVars,
+    rootFiles,
     existingFiles,
   };
 }
@@ -1107,33 +1109,6 @@ function getBaseImage(
   };
 }
 
-function installCmd(pm: string): string {
-  switch (pm) {
-    case "pnpm":
-      return "RUN npm i -g pnpm && pnpm install --frozen-lockfile";
-    case "yarn":
-      return "RUN yarn install --frozen-lockfile";
-    case "bun":
-      return "RUN npm i -g bun && bun install --frozen-lockfile";
-    default:
-      return "RUN npm ci";
-  }
-}
-
-function buildCmd(pm: string): string {
-  switch (pm) {
-    case "pnpm":
-      return "RUN pnpm run build";
-    case "yarn":
-      return "RUN yarn build";
-    case "bun":
-      return "RUN bun run build";
-    default:
-      return "RUN npm run build";
-  }
-
-}
-
 const GRADLE_BOOT_JAR_BUILD = `RUN gradle bootJar --no-daemon -x test || gradle jar --no-daemon -x test
 RUN set -e; \\
     BOOT_JAR=$(find /app -type f -path '*/build/libs/*.jar' ! -name '*-plain.jar' -exec du -b {} + | sort -rn | head -1 | cut -f2-); \\
@@ -1151,21 +1126,24 @@ export function generateDockerfile(
     (analysis.framework === "dotnet" ? analysis.dotnetSdkVersion : undefined);
   const images = getBaseImage(analysis.framework, analysis.language, v);
   const repo = analysis.repoName;
+  const copyDeps = dependencyCopyLine(analysis.rootFiles ?? []);
+  const install = installCmd(analysis.packageManager, analysis.rootFiles ?? []);
+  const build = buildCmd(analysis.packageManager);
 
   switch (analysis.framework) {
     case "nextjs":
       return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-COPY package*.json pnpm-lock.yaml yarn.lock bun.lock* ./
-${installCmd(analysis.packageManager)}
+${copyDeps}
+${install}
 
 # Stage 2: Build
 FROM ${images.node} AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-${buildCmd(analysis.packageManager)}
+${build}
 
 # Stage 3: Runner
 FROM ${images.node} AS runner
@@ -1347,8 +1325,8 @@ ENTRYPOINT ["dotnet", "${dllName}.dll"]
     case "angular":
       return `FROM ${images.node} AS deps
 WORKDIR /app
-COPY package*.json pnpm-lock.yaml yarn.lock bun.lock* ./
-${installCmd(analysis.packageManager)}
+${copyDeps}
+${install}
 
 FROM ${images.node} AS runner
 WORKDIR /app
@@ -1362,15 +1340,15 @@ CMD ["npm", "start"]
       return `# Stage 1: Dependencies
 FROM ${images.node} AS deps
 WORKDIR /app
-COPY package*.json pnpm-lock.yaml yarn.lock bun.lock* ./
-${installCmd(analysis.packageManager)}
+${copyDeps}
+${install}
 
 # Stage 2: Build
 FROM ${images.node} AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-${buildCmd(analysis.packageManager)}
+${build}
 
 # Stage 3: Runner
 FROM ${images.node} AS runner
@@ -1387,10 +1365,10 @@ CMD ["node", ".output/server/index.mjs"]
     case "svelte":
       return `FROM ${images.node} AS builder
 WORKDIR /app
-COPY package*.json pnpm-lock.yaml yarn.lock bun.lock* ./
-${installCmd(analysis.packageManager)}
+${copyDeps}
+${install}
 COPY . .
-${buildCmd(analysis.packageManager)}
+${build}
 
 FROM ${images.node} AS runner
 WORKDIR /app

@@ -1,4 +1,5 @@
 import type { AnalysisResult, Customizations } from "./types";
+import { dependencyCopyLine } from "./node-docker";
 
 export interface ExistingDockerFiles {
   Dockerfile?: string;
@@ -63,6 +64,22 @@ function fixDockerfile(
   if (!/CMD\s+/i.test(result) && !/ENTRYPOINT\s+/i.test(result)) {
     fixes.push("Dockerfile: added default CMD");
     result = `${result.trimEnd()}\nCMD ["./start.sh"]\n`;
+  }
+
+  const copyLine = dependencyCopyLine(analysis.rootFiles ?? []);
+  const updatedLines = result.split("\n").map((line) => {
+    if (
+      /^COPY\s+package/i.test(line) &&
+      /\s+\.\/\s*$/.test(line) &&
+      /lock|package/i.test(line)
+    ) {
+      return copyLine;
+    }
+    return line;
+  });
+  if (updatedLines.join("\n") !== result) {
+    fixes.push("Dockerfile: fixed dependency COPY to only include existing lockfiles");
+    result = updatedLines.join("\n");
   }
 
   return { content: result, fixes };
