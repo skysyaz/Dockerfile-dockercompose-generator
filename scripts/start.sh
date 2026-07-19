@@ -37,7 +37,9 @@ echo "[dockgen] starting Next.js app on internal port ${APP_PORT}..."
 run_as_nextjs sh -c "cd /app && PORT=${APP_PORT} HOSTNAME=127.0.0.1 node server.js" &
 
 echo "[dockgen] starting port-proxy on public port ${PUBLIC_PORT}..."
-exec run_as_nextjs env \
+exec su-exec nextjs env \
+  HOME="$HOME" \
+  DOCKER_CONFIG="$DOCKER_CONFIG" \
   PORT="${PUBLIC_PORT}" \
   NEXT_INTERNAL_PORT="${APP_PORT}" \
   BUILD_SERVICE_PORT="${BUILD_PORT}" \
