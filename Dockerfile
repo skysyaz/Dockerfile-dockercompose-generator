@@ -30,7 +30,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ARG DOCKER_GID=999
-RUN apk add --no-cache docker-cli docker-cli-compose && \
+RUN apk add --no-cache docker-cli docker-cli-compose su-exec && \
     addgroup -g 1001 -S nodejs && \
     adduser -S nextjs -u 1001 -G nodejs -h /home/nextjs && \
     mkdir -p /home/nextjs/.docker && \
@@ -50,10 +50,9 @@ COPY --chown=nextjs:nodejs mini-services/docker-build-service /mini-services/doc
 COPY --from=mini-deps /mini/port-proxy/node_modules /mini-services/port-proxy/node_modules
 COPY mini-services/port-proxy/index.mjs /mini-services/port-proxy/index.mjs
 
-COPY --chown=nextjs:nodejs scripts/start.sh /app/start.sh
+COPY --chown=root:root scripts/start.sh /app/start.sh
 RUN chmod +x /app/start.sh
 
-USER nextjs
 EXPOSE 5172 5173
 ENV PORT=5172
 ENV NEXT_INTERNAL_PORT=5174
