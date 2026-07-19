@@ -83,6 +83,14 @@ const FILE_TABS = [
   ".env",
 ] as const;
 
+const BUILD_TIMEOUT_SEC = 900;
+
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return m > 0 ? `${m}m ${s.toString().padStart(2, "0")}s` : `${s}s`;
+}
+
 function getSyntaxLanguage(filename: string): string {
   if (filename === "Dockerfile") return "docker";
   if (filename.endsWith(".yml")) return "yaml";
@@ -110,10 +118,14 @@ export default function HomePage() {
   const [buildOpen, setBuildOpen] = useState(false);
   const [buildLogs, setBuildLogs] = useState<BuildLogLine[]>([]);
   const [buildRunning, setBuildRunning] = useState(false);
+  const [buildOnly, setBuildOnly] = useState(true);
+  const [buildStartedAt, setBuildStartedAt] = useState<number | null>(null);
+  const [buildElapsedSec, setBuildElapsedSec] = useState(0);
   const [buildDone, setBuildDone] = useState<{
     success: boolean;
     reason?: string;
     exitCode?: number | null;
+    buildOnly?: boolean;
   } | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<ReturnType<typeof ioClient> | null>(null);
@@ -129,6 +141,16 @@ export default function HomePage() {
   useEffect(() => {
     logEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [buildLogs.length]);
+
+  useEffect(() => {
+    if (!buildRunning || buildStartedAt === null) return;
+    const tick = () => {
+      setBuildElapsedSec(Math.floor((Date.now() - buildStartedAt) / 1000));
+    };
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [buildRunning, buildStartedAt]);
 
   const resetAll = useCallback(() => {
     setRepoUrl("");
@@ -316,6 +338,8 @@ export default function HomePage() {
     setBuildLogs([]);
     setBuildRunning(true);
     setBuildDone(null);
+    setBuildStartedAt(Date.now());
+    setBuildElapsedSec(0);
 
     try {
       const tokenRes = await fetch("/api/build-token");
@@ -348,7 +372,8 @@ export default function HomePage() {
           repoUrl: analysis.repoUrl,
           githubToken: githubToken || undefined,
           files: fileList,
-          timeoutSec: 120,
+          timeoutSec: BUILD_TIMEOUT_SEC,
+          buildOnly,
           cloneRepo: true,
         });
       });
@@ -359,7 +384,12 @@ export default function HomePage() {
 
       socket.on(
         "done",
-        (payload: { success: boolean; reason?: string; exitCode?: number | null }) => {
+        (payload: {
+          success: boolean;
+          reason?: string;
+          exitCode?: number | null;
+          buildOnly?: boolean;
+        }) => {
           setBuildRunning(false);
           setBuildDone(payload);
         },
@@ -379,6 +409,8 @@ export default function HomePage() {
     socketRef.current?.disconnect();
     socketRef.current = null;
     setBuildOpen(false);
+    setBuildStartedAt(null);
+    setBuildElapsedSec(0);
   };
 
   const visibleFiles = FILE_TABS.filter((f) => files?.[f as keyof GeneratedFiles]);
@@ -604,6 +636,25 @@ export default function HomePage() {
                       Download ZIP
                     </Button>
                   </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-3 px-6 pb-2 text-sm">
+                  <div className="flex items-center gap-2">
+                    <Checkbox
+                      id="build-only"
+                      checked={buildOnly}
+                      onCheckedChange={(checked) => setBuildOnly(checked === true)}
+                      disabled={buildRunning}
+                    />
+                    <Label htmlFor="build-only" className="text-sm font-normal cursor-pointer">
+                      Build only{" "}
+                      <span className="text-muted-foreground">
+                        (docker compose build — recommended)
+                      </span>
+                    </Label>
+                  </div>
+                  <span className="text-xs text-muted-foreground">
+                    Timeout: {Math.floor(BUILD_TIMEOUT_SEC / 60)} min · validates image builds before Dokploy deploy
+                  </span>
                 </div>
               </CardHeader>
               <CardContent className="space-y-4">
@@ -969,27 +1020,46 @@ export default function HomePage() {
               Test Build · Live Logs
             </DialogTitle>
             <DialogDescription>
-              Cloning the repo, dropping in your generated Docker files, and running{" "}
-              <code className="font-mono">docker compose up --build</code> on the server.
+              {buildOnly ? (
+                <>
+                  Cloning the repo, writing your generated Docker files, and running{" "}
+                  <code className="font-mono">docker compose build</code> on the server to
+                  verify the image compiles.
+                </>
+              ) : (
+                <>
+                  Cloning the repo, writing your generated Docker files, and running{" "}
+                  <code className="font-mono">docker compose up --build</code> on the server.
+                </>
+              )}
             </DialogDescription>
           </DialogHeader>
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
             {buildRunning ? (
               <Badge className="bg-amber-500/10 text-amber-400 border-amber-500/30">
                 <Loader2 className="size-3 mr-1 animate-spin" />
-                Building...
+                {buildOnly ? "Building image" : "Building & starting"}
+                {buildStartedAt !== null ? ` · ${formatElapsed(buildElapsedSec)}` : ""}
               </Badge>
             ) : buildDone?.success ? (
               <Badge className="bg-emerald-500/10 text-emerald-400 border-emerald-500/30">
                 <Check className="size-3 mr-1" />
-                Build succeeded
+                {buildDone.buildOnly !== false ? "Image built successfully" : "Build succeeded"}
+                {buildElapsedSec > 0 ? ` · ${formatElapsed(buildElapsedSec)}` : ""}
               </Badge>
             ) : buildDone ? (
               <Badge variant="destructive">
-                Build failed{buildDone.reason ? ` · ${buildDone.reason}` : ""}
+                Build failed
+                {buildDone.reason ? ` · ${buildDone.reason}` : ""}
+                {buildElapsedSec > 0 ? ` · ${formatElapsed(buildElapsedSec)}` : ""}
               </Badge>
             ) : null}
             <div className="flex items-center gap-2 ml-auto">
+              {(buildRunning || buildDone) && buildElapsedSec > 0 && (
+                <span className="text-xs font-mono text-muted-foreground tabular-nums">
+                  Elapsed: {formatElapsed(buildElapsedSec)}
+                </span>
+              )}
               <span className="text-xs text-muted-foreground">{buildLogs.length} log lines</span>
               <Button
                 variant="outline"
@@ -1015,8 +1085,18 @@ export default function HomePage() {
             className="flex-1 rounded-lg border overflow-y-auto p-3 font-mono text-xs leading-relaxed"
             style={{ background: "oklch(0.18 0 0)" }}
           >
+            {buildRunning && buildElapsedSec >= 30 && (
+              <p className="italic text-amber-300/80 mb-3">
+                Still working — large repos (Java, Rust, etc.) can take several minutes between
+                log lines. Elapsed: {formatElapsed(buildElapsedSec)}.
+              </p>
+            )}
             {buildLogs.length === 0 ? (
-              <p className="italic text-muted-foreground">Connecting to build service...</p>
+              <p className="italic text-muted-foreground">
+                {buildRunning
+                  ? `Connecting to build service${buildElapsedSec > 0 ? ` · ${formatElapsed(buildElapsedSec)}` : ""}...`
+                  : "Connecting to build service..."}
+              </p>
             ) : (
               buildLogs.map((line, i) => (
                 <div key={i} className="whitespace-pre-wrap">

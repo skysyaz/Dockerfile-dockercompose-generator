@@ -22,6 +22,9 @@ const ALLOWED_ORIGINS = (process.env.BUILD_SERVICE_ORIGINS || "")
   .filter(Boolean);
 
 const BUILD_SOCKET_PATH = "/build-socket";
+const DEFAULT_TIMEOUT_SEC = 900;
+const MAX_TIMEOUT_SEC = 900;
+const MIN_TIMEOUT_SEC = 30;
 
 const ALLOWED_FILES = new Set([
   "Dockerfile",
@@ -134,11 +137,15 @@ io.on("connection", (socket) => {
       repoUrl,
       githubToken,
       files = [],
-      timeoutSec = 120,
+      timeoutSec = DEFAULT_TIMEOUT_SEC,
       cloneRepo = true,
+      buildOnly = true,
     } = payload ?? {};
 
-    const maxTimeout = Math.min(Math.max(timeoutSec, 30), 300);
+    const maxTimeout = Math.min(
+      Math.max(Number(timeoutSec) || DEFAULT_TIMEOUT_SEC, MIN_TIMEOUT_SEC),
+      MAX_TIMEOUT_SEC,
+    );
     let workDir = "";
 
     const log = (stream, text) => emitLog(socket, stream, text);
@@ -194,13 +201,14 @@ io.on("connection", (socket) => {
         log("system", `[write] ${file.name} (${file.content.length} bytes)`);
       }
 
-      const composeArgs = composeCommand([
-        "up",
-        "--build",
-        "--abort-on-container-exit",
-      ]);
+      const composeArgs = composeCommand(
+        buildOnly ? ["build"] : ["up", "--build", "--abort-on-container-exit"],
+      );
       const [composeBin, ...composeArgv] = composeArgs;
-      log("system", `[compose] ${composeBin} ${composeArgv.join(" ")}`);
+      log(
+        "system",
+        `[compose] ${composeBin} ${composeArgv.join(" ")} (timeout ${maxTimeout}s${buildOnly ? ", build-only" : ""})`,
+      );
 
       const compose = spawn(composeBin, composeArgv, {
         cwd: workDir,
@@ -239,19 +247,22 @@ io.on("connection", (socket) => {
         success: result.code === 0,
         exitCode: result.code,
         reason: result.killed ? "timeout" : undefined,
+        buildOnly,
       });
     } catch (error) {
       log("stderr", error instanceof Error ? error.message : String(error));
       socket.emit("done", { success: false, exitCode: null });
     } finally {
       if (workDir) {
-        const downCommand = await resolveComposeCommand();
-        if (downCommand) {
-          const downArgs = downCommand(["down", "--volumes", "--remove-orphans"]);
-          spawn(downArgs[0], downArgs.slice(1), {
-            cwd: workDir,
-            env: dockerEnv(),
-          });
+        if (!buildOnly) {
+          const downCommand = await resolveComposeCommand();
+          if (downCommand) {
+            const downArgs = downCommand(["down", "--volumes", "--remove-orphans"]);
+            spawn(downArgs[0], downArgs.slice(1), {
+              cwd: workDir,
+              env: dockerEnv(),
+            });
+          }
         }
         await fs.rm(workDir, { recursive: true, force: true }).catch(() => {});
         log("system", "[cleanup] work directory removed");
