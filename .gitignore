@@ -11,3 +11,6 @@ coverage
 .DS_Store
 backend/
 frontend/
+
+# TypeScript incremental build info
+*.tsbuildinfo

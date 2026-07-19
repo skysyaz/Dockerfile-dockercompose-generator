@@ -7,9 +7,17 @@ interface RateLimitEntry {
 }
 
 const buckets = new Map<string, RateLimitEntry>();
+const PURGE_THRESHOLD = 1000;
+
+function purgeExpired(now: number): void {
+  for (const [key, entry] of buckets) {
+    if (entry.resetAt <= now) buckets.delete(key);
+  }
+}
 
 export function checkRateLimit(key: string): { allowed: boolean; retryAfterSec?: number } {
   const now = Date.now();
+  if (buckets.size >= PURGE_THRESHOLD) purgeExpired(now);
   const entry = buckets.get(key);
 
   if (!entry || entry.resetAt <= now) {

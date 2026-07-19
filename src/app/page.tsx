@@ -358,27 +358,25 @@ export default function HomePage() {
 
   const handleServiceToggle = useCallback(
     (serviceName: string, checked: boolean) => {
-      setEnabledServices((prev) => {
-        const next = checked
-          ? [...prev, serviceName]
-          : prev.filter((n) => n !== serviceName);
-        if (analysis) {
-          const envRecord = Object.fromEntries(
-            extraEnv.filter((e) => e.key).map((e) => [e.key, e.value]),
-          );
-          generateFiles(analysis.repoUrl, githubToken, {
-            port: portOverride ? Number(portOverride) : undefined,
-            baseImageVersion: baseImageVersion || undefined,
-            extraEnv: Object.keys(envRecord).length ? envRecord : undefined,
-            enabledServices: next,
-            databaseMode,
-            envValues: Object.keys(envValues).length ? envValues : undefined,
-          }, { preserveEnvEdits: true }).catch((err) => {
-            toast.error(err instanceof Error ? err.message : "Failed to update services");
-          });
-        }
-        return next;
-      });
+      const next = checked
+        ? [...enabledServices, serviceName]
+        : enabledServices.filter((n) => n !== serviceName);
+      setEnabledServices(next);
+      if (analysis) {
+        const envRecord = Object.fromEntries(
+          extraEnv.filter((e) => e.key).map((e) => [e.key, e.value]),
+        );
+        generateFiles(analysis.repoUrl, githubToken, {
+          port: portOverride ? Number(portOverride) : undefined,
+          baseImageVersion: baseImageVersion || undefined,
+          extraEnv: Object.keys(envRecord).length ? envRecord : undefined,
+          enabledServices: next,
+          databaseMode,
+          envValues: Object.keys(envValues).length ? envValues : undefined,
+        }, { preserveEnvEdits: true }).catch((err) => {
+          toast.error(err instanceof Error ? err.message : "Failed to update services");
+        });
+      }
     },
     [analysis, extraEnv, portOverride, baseImageVersion, githubToken, enabledServices, databaseMode, envValues, generateFiles],
   );
@@ -465,7 +463,7 @@ export default function HomePage() {
 
   const formatBuildLogs = (logs: BuildLogLine[]) =>
     logs
-      .map((line) => `${new Date(line.t).toLocaleTimeString()}${line.text}`)
+      .map((line) => `${new Date(line.t).toLocaleTimeString()} ${line.text}`)
       .join("\n");
 
   const copyBuildLogs = async () => {

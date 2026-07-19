@@ -110,6 +110,50 @@ export function parseGithubUrl(url: string): { owner: string; repo: string } | n
   return { owner, repo };
 }
 
+/**
+ * Server-side requests to arbitrary "Gitea-compatible" hosts are an SSRF
+ * vector. Reject loopback, link-local, RFC1918, and bare intranet hostnames
+ * unless the operator explicitly opts in via ALLOW_PRIVATE_GIT_HOSTS=true.
+ */
+export function isPrivateGitHost(host: string): boolean {
+  let name = host.toLowerCase();
+  const bracketed = name.match(/^\[([^\]]+)\](?::\d+)?$/);
+  if (bracketed) {
+    name = bracketed[1];
+  } else {
+    name = name.replace(/:\d+$/, "");
+  }
+
+  if (/^(localhost|.+\.localhost|.+\.local|.+\.internal|.+\.home\.arpa)$/.test(name)) {
+    return true;
+  }
+
+  const ipv4 = name.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const a = Number(ipv4[1]);
+    const b = Number(ipv4[2]);
+    return (
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+
+  if (name.includes(":")) {
+    return (
+      name === "::" ||
+      name === "::1" ||
+      /^(fe80|fc[0-9a-f]{2}|fd[0-9a-f]{2}):/.test(name)
+    );
+  }
+
+  // Bare hostnames without a dot only resolve on internal networks.
+  return !name.includes(".");
+}
+
 export function resolveAccessToken(
   provider: RepoProvider,
   requestToken?: string,
