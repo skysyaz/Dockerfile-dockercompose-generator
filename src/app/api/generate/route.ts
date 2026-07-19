@@ -4,9 +4,9 @@ import {
   cloneAndAnalyze,
   getCachedAnalysis,
   getCachedCloneDir,
-  parseGithubUrl,
   redactSecrets,
 } from "@/lib/analyzer";
+import { parseRepoUrl, resolveAccessToken } from "@/lib/repo-url";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import type { Customizations } from "@/lib/types";
 import {
@@ -29,6 +29,7 @@ export async function POST(request: NextRequest) {
     const body = (await request.json()) as {
       repoUrl?: string;
       githubToken?: string;
+      accessToken?: string;
       port?: number;
       baseImageVersion?: string;
       extraEnv?: Record<string, string>;
@@ -36,14 +37,21 @@ export async function POST(request: NextRequest) {
     };
 
     const repoUrl = body.repoUrl?.trim();
-    if (!repoUrl || !parseGithubUrl(repoUrl)) {
+    const parsed = repoUrl ? parseRepoUrl(repoUrl) : null;
+    if (!repoUrl || !parsed) {
       return NextResponse.json(
-        { detail: "Please enter a valid GitHub repository URL" },
+        {
+          detail:
+            "Please enter a valid repository URL (GitHub, GitLab, Bitbucket, Codeberg, or Gitea).",
+        },
         { status: 400 },
       );
     }
 
-    const token = body.githubToken?.trim() || process.env.GITHUB_TOKEN || undefined;
+    const token = resolveAccessToken(
+      parsed.provider,
+      body.accessToken || body.githubToken,
+    );
     const customizations: Customizations = {
       port: sanitizePort(body.port),
       baseImageVersion: sanitizeBaseImageVersion(body.baseImageVersion),

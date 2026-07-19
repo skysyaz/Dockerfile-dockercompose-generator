@@ -1,14 +1,11 @@
 import { createServer } from "http";
 import { spawn } from "child_process";
-import { createGunzip } from "zlib";
-import { Readable } from "stream";
-import { pipeline } from "stream/promises";
 import * as fs from "fs/promises";
 import * as path from "path";
 import * as os from "os";
-import * as tar from "tar";
 import { Server } from "socket.io";
 import { dockerEnv, resolveComposeCommand } from "./compose.js";
+import { fetchRepoArchive } from "./repo-providers.js";
 
 const PORT = Number(process.env.BUILD_SERVICE_PORT || 5173);
 const BUILD_TOKEN = process.env.BUILD_SERVICE_TOKEN || "";
@@ -42,59 +39,11 @@ function redactSecrets(message) {
     .replace(/(https?:\/\/)[^@]+@/g, "$1");
 }
 
-function parseGithubUrl(url) {
-  const m = url.match(/github\.com[/:]([^/]+)\/([^/#?]+)/);
-  if (!m) return null;
-  const repo = m[2].replace(/\.git$/, "").replace(/\/$/, "");
-  if (!repo) return null;
-  return { owner: m[1], repo };
-}
-
 function isAllowedFile(name) {
   if (!name || name.includes("..") || name.includes("/") || name.includes("\\")) {
     return false;
   }
   return ALLOWED_FILES.has(name);
-}
-
-async function fetchRepoTarball(repoUrl, dest, githubToken) {
-  const parsed = parseGithubUrl(repoUrl);
-  if (!parsed) throw new Error("Invalid GitHub URL");
-  const { owner, repo } = parsed;
-  const tarballUrl = `https://api.github.com/repos/${owner}/${repo}/tarball`;
-  const headers = {
-    "User-Agent": "DockGen/1.0",
-    Accept: "application/vnd.github+json",
-    ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
-  };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 90_000);
-  try {
-    const res = await fetch(tarballUrl, {
-      headers,
-      redirect: "follow",
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      throw new Error(`GitHub API returned ${res.status}`);
-    }
-    await fs.mkdir(dest, { recursive: true });
-    const nodeStream = Readable.fromWeb(res.body);
-    await pipeline(
-      nodeStream,
-      createGunzip(),
-      tar.x({
-        cwd: dest,
-        strip: 1,
-        filter: (filePath) => {
-          const normalized = filePath.replace(/\\/g, "/");
-          return !normalized.startsWith("/") && !normalized.includes("..");
-        },
-      }),
-    );
-  } finally {
-    clearTimeout(timer);
-  }
 }
 
 function emitLog(socket, stream, text) {
@@ -181,7 +130,7 @@ io.on("connection", (socket) => {
       if (cloneRepo !== false) {
         log("system", `[fetch] downloading tarball for ${repoUrl}`);
         try {
-          await fetchRepoTarball(repoUrl, workDir, githubToken);
+          await fetchRepoArchive(repoUrl, workDir, githubToken);
           log("system", "[fetch] done");
         } catch (error) {
           log("stderr", error instanceof Error ? error.message : String(error));

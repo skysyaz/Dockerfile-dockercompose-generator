@@ -2,9 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import {
   classifyCloneError,
   cloneAndAnalyze,
-  parseGithubUrl,
   redactSecrets,
 } from "@/lib/analyzer";
+import { parseRepoUrl, resolveAccessToken } from "@/lib/repo-url";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 
 export async function POST(request: NextRequest) {
@@ -21,17 +21,25 @@ export async function POST(request: NextRequest) {
     const body = (await request.json()) as {
       repoUrl?: string;
       githubToken?: string;
+      accessToken?: string;
     };
 
     const repoUrl = body.repoUrl?.trim();
-    if (!repoUrl || !parseGithubUrl(repoUrl)) {
+    const parsed = repoUrl ? parseRepoUrl(repoUrl) : null;
+    if (!repoUrl || !parsed) {
       return NextResponse.json(
-        { detail: "Please enter a valid GitHub repository URL" },
+        {
+          detail:
+            "Please enter a valid repository URL (GitHub, GitLab, Bitbucket, Codeberg, or Gitea).",
+        },
         { status: 400 },
       );
     }
 
-    const token = body.githubToken?.trim() || process.env.GITHUB_TOKEN || undefined;
+    const token = resolveAccessToken(
+      parsed.provider,
+      body.accessToken || body.githubToken,
+    );
     const { analysis } = await cloneAndAnalyze(repoUrl, token);
 
     return NextResponse.json({

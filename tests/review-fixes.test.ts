@@ -5,6 +5,7 @@ import {
   classifyCloneError,
   parseGithubUrl,
 } from "../src/lib/analyzer.ts";
+import { parseRepoUrl } from "../src/lib/repo-url.ts";
 import {
   isAllowedBuildFile,
   sanitizeBaseImageVersion,
@@ -15,6 +16,7 @@ import type { AnalysisResult } from "../src/lib/types.ts";
 const baseAnalysis: AnalysisResult = {
   repoUrl: "https://github.com/user/app",
   repoName: "app",
+  repoProvider: "github",
   language: "python",
   framework: "fastapi",
   packageManager: "pip",
@@ -39,6 +41,7 @@ describe("parseGithubUrl", () => {
     assert.deepEqual(parseGithubUrl("https://github.com/o/r"), { owner: "o", repo: "r" });
     assert.deepEqual(parseGithubUrl("https://github.com/o/r.git"), { owner: "o", repo: "r" });
     assert.equal(parseGithubUrl("https://gitlab.com/o/r"), null);
+    assert.equal(parseRepoUrl("https://gitlab.com/o/r")?.provider, "gitlab");
   });
 });
 

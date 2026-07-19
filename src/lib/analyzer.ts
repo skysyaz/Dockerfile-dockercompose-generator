@@ -1,10 +1,8 @@
-import { createGunzip } from "zlib";
-import { Readable } from "stream";
-import { pipeline } from "stream/promises";
 import * as fs from "fs/promises";
 import * as path from "path";
-import * as tar from "tar";
 import { auditExistingFiles, type ExistingDockerFiles } from "./docker-audit";
+import { fetchRepoArchive } from "./repo-fetch";
+import { parseGithubUrl, parseRepoUrl } from "./repo-url";
 import type {
   AnalysisResult,
   Customizations,
@@ -12,6 +10,7 @@ import type {
   Framework,
   GeneratedFiles,
   Language,
+  RepoProvider,
 } from "./types";
 
 const SKIP_DIRS = new Set([
@@ -93,122 +92,16 @@ function normalizeRepoUrl(url: string): string {
   return url.trim().replace(/\.git$/, "").replace(/\/$/, "");
 }
 
-export { normalizeRepoUrl };
-
-export function parseGithubUrl(url: string): { owner: string; repo: string } | null {
-  const m = url.match(/github\.com[/:]([^/]+)\/([^/#?]+)/);
-  if (!m) return null;
-  const repo = m[2].replace(/\.git$/, "").replace(/\/$/, "");
-  if (!repo) return null;
-  return { owner: m[1], repo };
-}
-
-export function redactSecrets(message: string): string {
-  return message.replace(/(https?:\/\/)[^@]+@/g, "$1");
-}
-
-export function classifyCloneError(
-  rawMessage: string,
-): { status: 404 | 401 | 504 | 429; message: string } | null {
-  const message = redactSecrets(rawMessage);
-  if (
-    /fatal: repository ['"].*['"] does not exist|Repository not found/i.test(message)
-  ) {
-    return {
-      status: 404,
-      message:
-        "Repository not found. Check the URL, or if it is private, provide a GitHub personal access token with repo scope.",
-    };
-  }
-  if (
-    /could not read Username|could not read Password|Authentication failed|Permission denied|requires authentication/i.test(
-      message,
-    )
-  ) {
-    return {
-      status: 401,
-      message:
-        "Could not access the repository. If it is private, provide a valid GitHub personal access token with repo scope.",
-    };
-  }
-  if (/rate limit/i.test(message)) {
-    return { status: 429, message };
-  }
-  if (
-    /timed out|timeout|ETIMEDOUT|early EOF|RPC failed|fetch-pack: unexpected disconnect|aborted/i.test(
-      message,
-    )
-  ) {
-    return {
-      status: 504,
-      message:
-        "Cloning timed out or was interrupted. The repository may be too large — try again or use a smaller repo.",
-    };
-  }
-  return null;
-}
+export { normalizeRepoUrl, parseGithubUrl, parseRepoUrl };
+export type { RepoProvider } from "./types";
+export { redactSecrets, classifyCloneError } from "./analyzer-errors";
 
 export async function cloneRepo(
   repoUrl: string,
   dest: string,
-  githubToken?: string,
+  accessToken?: string,
 ): Promise<void> {
-  const parsed = parseGithubUrl(repoUrl);
-  if (!parsed) throw new Error("Invalid GitHub repository URL");
-  const { owner, repo } = parsed;
-  const tarballUrl = `https://api.github.com/repos/${owner}/${repo}/tarball`;
-  const headers: Record<string, string> = {
-    "User-Agent": "DockGen/1.0",
-    Accept: "application/vnd.github+json",
-    ...(githubToken ? { Authorization: `Bearer ${githubToken}` } : {}),
-  };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 90_000);
-  try {
-    const res = await fetch(tarballUrl, {
-      headers,
-      redirect: "follow",
-      signal: controller.signal,
-    });
-    if (!res.ok) {
-      if (res.status === 404) {
-        throw new Error(`fatal: repository '${owner}/${repo}' does not exist`);
-      }
-      if (res.status === 401 || res.status === 403) {
-        const remaining = res.headers.get("x-ratelimit-remaining");
-        const reset = res.headers.get("x-ratelimit-reset");
-        if (remaining === "0" && reset) {
-          const mins = Math.max(
-            1,
-            Math.ceil((parseInt(reset, 10) * 1000 - Date.now()) / 60_000),
-          );
-          throw new Error(
-            `GitHub API rate limit exceeded. Try again in ${mins} minute(s), or provide a GitHub token to increase your limit.`,
-          );
-        }
-        throw new Error(
-          `fatal: Authentication failed for https://github.com/${owner}/${repo}. If the repo is private, provide a valid GitHub token with repo scope.`,
-        );
-      }
-      throw new Error(`GitHub API returned ${res.status}`);
-    }
-    await fs.mkdir(dest, { recursive: true });
-    const nodeStream = Readable.fromWeb(res.body as never);
-    await pipeline(
-      nodeStream,
-      createGunzip(),
-      tar.x({
-        cwd: dest,
-        strip: 1,
-        filter: (filePath) => {
-          const normalized = filePath.replace(/\\/g, "/");
-          return !normalized.startsWith("/") && !normalized.includes("..");
-        },
-      }),
-    );
-  } finally {
-    clearTimeout(timer);
-  }
+  await fetchRepoArchive(repoUrl, dest, accessToken);
 }
 
 async function fileExists(filePath: string): Promise<boolean> {
@@ -942,8 +835,9 @@ export async function analyzeDirectory(
   repoUrl: string,
   cloneDir: string,
 ): Promise<AnalysisResult> {
-  const parsed = parseGithubUrl(repoUrl);
-  const repoName = parsed?.repo ?? "app";
+  const parsed = parseRepoUrl(repoUrl);
+  const repoName = parsed?.repoName ?? "app";
+  const repoProvider = parsed?.provider ?? "github";
   const backendSubdir = await findBackendSubdir(cloneDir);
   const workDir = backendSubdir
     ? path.join(cloneDir, backendSubdir)
@@ -970,6 +864,7 @@ export async function analyzeDirectory(
   return {
     repoUrl,
     repoName,
+    repoProvider,
     language: detection.language,
     framework: detection.framework,
     packageManager,

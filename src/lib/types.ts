@@ -60,9 +60,12 @@ export interface DetectedService {
   volumes?: string[];
 }
 
+export type RepoProvider = "github" | "gitlab" | "bitbucket" | "codeberg" | "gitea";
+
 export interface AnalysisResult {
   repoUrl: string;
   repoName: string;
+  repoProvider: RepoProvider;
   language: Language;
   framework: Framework;
   packageManager: string;

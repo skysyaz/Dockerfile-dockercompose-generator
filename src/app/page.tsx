@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import JSZip from "jszip";
 import { io as ioClient } from "socket.io-client";
 import { toast } from "sonner";
@@ -14,7 +14,7 @@ import {
   Eye,
   EyeOff,
   FileText,
-  Github,
+  GitBranch,
   KeyRound,
   Layers,
   Loader2,
@@ -54,11 +54,13 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { CodeBlock } from "@/components/code-block";
-import type { AnalysisResult, BuildLogLine, GeneratedFiles } from "@/lib/types";
+import { getProviderLabel, parseRepoUrl } from "@/lib/repo-url";
+import type { AnalysisResult, BuildLogLine, GeneratedFiles, RepoProvider } from "@/lib/types";
 
 const SAMPLE_REPOS = [
   { label: "Next.js", url: "https://github.com/vercel/commerce" },
   { label: "FastAPI", url: "https://github.com/tiangolo/fastapi" },
+  { label: "GitLab", url: "https://gitlab.com/gitlab-org/gitlab-runner" },
   { label: "Django", url: "https://github.com/wsvincent/lithium" },
   { label: "Rails", url: "https://github.com/rails/rails" },
   { label: "Go", url: "https://github.com/gin-gonic/gin" },
@@ -66,6 +68,37 @@ const SAMPLE_REPOS = [
   { label: "Spring Boot", url: "https://github.com/spring-projects/spring-petclinic" },
   { label: "Laravel", url: "https://github.com/laravel/laravel" },
 ];
+
+const TOKEN_HELP: Record<
+  RepoProvider,
+  { label: string; href: string; scope: string }
+> = {
+  github: {
+    label: "GitHub",
+    href: "https://github.com/settings/tokens",
+    scope: "repo",
+  },
+  gitlab: {
+    label: "GitLab",
+    href: "https://gitlab.com/-/user_settings/personal_access_tokens",
+    scope: "read_repository",
+  },
+  bitbucket: {
+    label: "Bitbucket",
+    href: "https://bitbucket.org/account/settings/app-passwords/",
+    scope: "repository:read",
+  },
+  codeberg: {
+    label: "Codeberg",
+    href: "https://codeberg.org/user/settings/applications",
+    scope: "read:repository",
+  },
+  gitea: {
+    label: "Gitea",
+    href: "https://docs.gitea.com/development/api-usage#authentication",
+    scope: "read repository",
+  },
+};
 
 const LOADING_STEPS = [
   "Cloning repository...",
@@ -129,6 +162,12 @@ export default function HomePage() {
   } | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
   const socketRef = useRef<ReturnType<typeof ioClient> | null>(null);
+
+  const detectedProvider = useMemo(
+    () => parseRepoUrl(repoUrl.trim())?.provider ?? "github",
+    [repoUrl],
+  );
+  const tokenHelp = TOKEN_HELP[detectedProvider];
 
   useEffect(() => {
     if (!loading) return;
@@ -429,8 +468,8 @@ export default function HomePage() {
             </div>
           </div>
           <div className="hidden sm:flex items-center gap-2 text-sm text-muted-foreground">
-            <Github className="size-4" />
-            Public & private repos supported
+            <GitBranch className="size-4" />
+            GitHub · GitLab · Bitbucket · Codeberg · Gitea
           </div>
         </div>
       </header>
@@ -443,14 +482,16 @@ export default function HomePage() {
               Auto-detects 15+ frameworks · private repos · live build testing
             </Badge>
             <h1 className="text-4xl md:text-5xl font-bold tracking-tight mb-4">
-              Dockerize any GitHub repo{" "}
+              Dockerize any git repo{" "}
               <span className="text-emerald-500">in seconds</span>
             </h1>
             <p className="text-muted-foreground text-lg">
-              Generate production-ready <code className="font-mono text-sm">Dockerfile</code>,{" "}
+              Paste a URL from GitHub, GitLab, Bitbucket, Codeberg, or any Gitea-compatible host.
+              DockGen generates production-ready{" "}
+              <code className="font-mono text-sm">Dockerfile</code>,{" "}
               <code className="font-mono text-sm">docker-compose.yml</code>,{" "}
               <code className="font-mono text-sm">.env</code>, and{" "}
-              <code className="font-mono text-sm">.env.example</code> from any repository.
+              <code className="font-mono text-sm">.env.example</code>.
             </p>
           </section>
         )}
@@ -466,10 +507,10 @@ export default function HomePage() {
             >
               <div className="flex flex-col sm:flex-row gap-2">
                 <div className="relative flex-1">
-                  <Github className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
+                  <GitBranch className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
                   <Input
                     className="pl-9 h-11"
-                    placeholder="https://github.com/owner/repo"
+                    placeholder="https://github.com/owner/repo · gitlab.com · bitbucket.org · codeberg.org"
                     value={repoUrl}
                     onChange={(e) => setRepoUrl(e.target.value)}
                     disabled={loading}
@@ -498,14 +539,14 @@ export default function HomePage() {
               <div className="space-y-1.5">
                 <Label className="flex items-center gap-2">
                   <Lock className="size-3.5" />
-                  GitHub Token (optional — required for private repos)
+                  {tokenHelp.label} token (optional — required for private repos)
                 </Label>
                 <div className="relative flex gap-2">
                   <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
                   <Input
                     type={showToken ? "text" : "password"}
                     className="pl-9 font-mono"
-                    placeholder="ghp_xxxxx"
+                    placeholder="Personal access token"
                     value={githubToken}
                     onChange={(e) => setGithubToken(e.target.value)}
                     disabled={loading}
@@ -520,16 +561,17 @@ export default function HomePage() {
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Token is sent only to the server, used for cloning, and never stored. Create one at{" "}
+                  Token is sent only to the server, used for downloading the repo archive, and never
+                  stored. Create one in{" "}
                   <a
-                    href="https://github.com/settings/tokens"
+                    href={tokenHelp.href}
                     target="_blank"
                     rel="noreferrer"
                     className="text-emerald-500 hover:underline"
                   >
-                    Settings → Tokens
+                    {tokenHelp.label} settings
                   </a>{" "}
-                  with <code className="font-mono">repo</code> scope.
+                  with <code className="font-mono">{tokenHelp.scope}</code> scope.
                 </p>
               </div>
             </form>
@@ -614,6 +656,9 @@ export default function HomePage() {
                           authed
                         </Badge>
                       )}
+                      <Badge variant="outline" className="ml-2 text-muted-foreground">
+                        {getProviderLabel(analysis.repoProvider)}
+                      </Badge>
                     </CardDescription>
                   </div>
                   <div className="flex flex-wrap gap-2">
