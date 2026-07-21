@@ -311,15 +311,16 @@ describe("native node modules and engine versions", () => {
 });
 
 describe("monorepo compose build context", () => {
-  it("points the build context at the backend subdirectory", () => {
+  it("uses root context so .dockerignore at repo root is respected", () => {
     const analysis: AnalysisResult = {
       ...base,
       framework: "fastapi",
       backendSubdir: "backend",
     };
     const compose = generateDockerCompose(analysis, {});
-    assert.match(compose, /context: \.\/backend/);
-    assert.match(compose, /dockerfile: \.\.\/Dockerfile/);
+    // Always build from repo root; Dockerfile COPY instructions carry the prefix.
+    assert.match(compose, /build: \./);
+    assert.doesNotMatch(compose, /context:/);
   });
 
   it("keeps root context for .NET (its Dockerfile is repo-root aware)", () => {
@@ -331,15 +332,15 @@ describe("monorepo compose build context", () => {
     assert.match(generateDockerCompose(analysis, {}), /build: \./);
   });
 
-  it("escapes nested subdirectories correctly", () => {
+  it("uses root context for nested subdirectories", () => {
     const analysis: AnalysisResult = {
       ...base,
       framework: "go",
       backendSubdir: "services/api",
     };
     const compose = generateDockerCompose(analysis, {});
-    assert.match(compose, /context: \.\/services\/api/);
-    assert.match(compose, /dockerfile: \.\.\/\.\.\/Dockerfile/);
+    assert.match(compose, /build: \./);
+    assert.doesNotMatch(compose, /context:/);
   });
 });
 

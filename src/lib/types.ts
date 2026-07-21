@@ -140,6 +140,8 @@ export interface AnalysisResult {
   nodeVersion?: string;
   /** Root package.json declares preinstall/install/postinstall/prepare scripts. */
   hasNodeLifecycleScripts?: boolean;
+  /** Elixir/Phoenix app name parsed from mix.exs, used to build the release CMD. */
+  elixirAppName?: string;
 }
 
 export interface Customizations {

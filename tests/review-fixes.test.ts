@@ -124,7 +124,7 @@ describe("generateDockerfile", () => {
     assert.doesNotMatch(dockerfile, /COPY \*\.csproj/);
   });
 
-  it("omits missing lockfiles for pnpm monorepos like open-design", () => {
+  it("copies full source for pnpm monorepos (workspace packages need to be resolvable)", () => {
     const analysis: AnalysisResult = {
       ...baseAnalysis,
       language: "typescript",
@@ -137,7 +137,9 @@ describe("generateDockerfile", () => {
     };
     const dockerfile = generateDockerfile(analysis, {});
 
-    assert.match(dockerfile, /COPY package\*\.json pnpm-lock\.yaml pnpm-workspace\.yaml \.\//);
+    // pnpm-workspace.yaml signals a workspace; full source must be copied so
+    // workspace packages can be resolved during install.
+    assert.match(dockerfile, /COPY \. \./);
     assert.doesNotMatch(dockerfile, /yarn\.lock/);
     assert.doesNotMatch(dockerfile, /bun\.lock/);
     assert.match(dockerfile, /pnpm install --frozen-lockfile/);

@@ -275,7 +275,7 @@ describe("formatEnvValue", () => {
   it("quotes values containing spaces", () => {
     assert.equal(formatEnvValue("simple"), "simple");
     assert.equal(formatEnvValue("has spaces"), '"has spaces"');
-    assert.equal(formatEnvValue("line\nbreak"), null);
+    assert.equal(formatEnvValue("line\nbreak"), '"line\\nbreak"');
   });
 
   it("single-quotes values with $ so compose does not interpolate them", () => {

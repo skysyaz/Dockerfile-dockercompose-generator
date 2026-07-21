@@ -20,7 +20,7 @@ function assertNotPrivateHost(host: string): void {
   }
 }
 
-const DEFAULT_BRANCHES = ["main", "master", "HEAD"];
+const DEFAULT_BRANCHES = ["main", "master", "HEAD", "develop", "trunk", "release", "production"];
 const EXTRACT_TIMEOUT_MS = 300_000;
 
 async function extractTarball(response: Response, dest: string): Promise<void> {
@@ -51,18 +51,33 @@ async function extractTarball(response: Response, dest: string): Promise<void> {
 async function fetchWithTimeout(
   url: string,
   headers: Record<string, string>,
+  maxRedirects = 5,
 ): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 90_000);
-  try {
-    return await fetch(url, {
-      headers,
-      redirect: "follow",
-      signal: controller.signal,
-    });
-  } finally {
-    clearTimeout(timer);
+  let currentUrl = url;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 90_000);
+    let res: Response;
+    try {
+      res = await fetch(currentUrl, {
+        headers,
+        redirect: "manual",
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+    if (res.status >= 300 && res.status < 400) {
+      const location = res.headers.get("location");
+      if (!location) return res;
+      const next = new URL(location, currentUrl);
+      assertNotPrivateHost(next.hostname);
+      currentUrl = next.href;
+      continue;
+    }
+    return res;
   }
+  throw new Error(`Too many redirects fetching ${url}`);
 }
 
 async function fetchGithubArchive(

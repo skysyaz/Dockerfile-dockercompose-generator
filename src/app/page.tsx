@@ -1090,12 +1090,35 @@ export default function HomePage() {
                       {hasCustomChanges && (
                         <Button
                           variant="ghost"
-                          onClick={() => {
+                          disabled={regenerating}
+                          onClick={async () => {
                             setPortOverride("");
                             setBaseImageVersion("");
                             setExtraEnv([]);
-                            if (analysis) setEnvValues(envValuesFromAnalysis(analysis));
                             setDatabaseMode("bundled");
+                            if (!analysis) return;
+                            const defaults = envValuesFromAnalysis(analysis);
+                            setEnvValues(defaults);
+                            setRegenerating(true);
+                            try {
+                              await generateFiles(
+                                analysis.repoUrl,
+                                githubToken,
+                                {
+                                  enabledServices,
+                                  databaseMode: "bundled",
+                                  envValues: defaults,
+                                },
+                                { preserveEnvEdits: false },
+                              );
+                              toast.success("Customization reset");
+                            } catch (err) {
+                              toast.error(
+                                err instanceof Error ? err.message : "Reset failed",
+                              );
+                            } finally {
+                              setRegenerating(false);
+                            }
                           }}
                         >
                           Reset

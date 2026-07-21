@@ -232,7 +232,16 @@ export function canonicalEnvKey(key: string): string | null {
 }
 
 export function formatEnvValue(value: string): string | null {
-  if (value.includes("\n") || value.includes("\r")) return null;
+  // Fold multiline values into a double-quoted string with literal \n sequences.
+  // We don't re-escape backslashes here because doing so would double-escape
+  // the backslashes we just introduced from the newline folding.
+  if (value.includes("\n") || value.includes("\r")) {
+    const folded = value
+      .replace(/\r\n|\r|\n/g, "\\n")
+      .replace(/"/g, '\\"')
+      .replace(/\$/g, "$$$$");
+    return `"${folded}"`;
+  }
   // docker compose interpolates $ in env_file values (unquoted AND
   // double-quoted), so a password like pa$$w0rd would silently become
   // pa$w0rd. Single-quoted values are passed through literally.
@@ -558,6 +567,9 @@ function varsFromParsed(
   for (const { key, value } of parsed) {
     const canonical = canonicalEnvKey(key);
     if (!canonical) continue;
+    // Filter out system-provided variables regardless of source so we don't
+    // emit empty overrides for PATH, HOME, etc. found in env example files.
+    if (SYSTEM_ENV_KEYS.has(canonical.toUpperCase())) continue;
     upsertVar(
       map,
       {
@@ -891,7 +903,8 @@ function frameworkDefaults(
     case "django":
       push({
         key: "DJANGO_SETTINGS_MODULE",
-        suggestedValue: `${repoName}.settings`,
+        // Django module names must use underscores, not hyphens.
+        suggestedValue: `${repoName.replace(/-/g, "_")}.settings`,
         category: "framework",
         source: "framework-default",
         required: true,
