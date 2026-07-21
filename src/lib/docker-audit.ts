@@ -24,6 +24,10 @@ function isUsableDockerfile(content: string): boolean {
   return trimmed.length > 20 && /^\s*FROM\s+/im.test(trimmed);
 }
 
+function insertAfterFirstFrom(content: string, envLine: string): string {
+  return content.replace(/(^\s*FROM\s+[^\n]+\n)/im, `$1${envLine}\n`);
+}
+
 function fixDockerfile(
   content: string,
   analysis: AnalysisResult,
@@ -50,7 +54,7 @@ function fixDockerfile(
 
   if (analysis.framework === "nextjs" && !/NODE_ENV\s*=/i.test(result)) {
     fixes.push("Dockerfile: added NODE_ENV=production for Next.js");
-    result = `ENV NODE_ENV=production\n${result}`;
+    result = insertAfterFirstFrom(result, "ENV NODE_ENV=production");
   }
 
   if (
@@ -58,7 +62,7 @@ function fixDockerfile(
     !/PYTHONUNBUFFERED/i.test(result)
   ) {
     fixes.push("Dockerfile: added PYTHONUNBUFFERED=1");
-    result = `ENV PYTHONUNBUFFERED=1\n${result}`;
+    result = insertAfterFirstFrom(result, "ENV PYTHONUNBUFFERED=1");
   }
 
   if (!/CMD\s+/i.test(result) && !/ENTRYPOINT\s+/i.test(result)) {
@@ -80,6 +84,7 @@ function fixAppServicePorts(content: string, port: number): { content: string; c
   let inApp = false;
   let appIndent = -1;
   let changed = false;
+  let portsRewritten = 0;
 
   const updated = lines.map((line) => {
     const indent = line.search(/\S/);
@@ -94,9 +99,11 @@ function fixAppServicePorts(content: string, port: number): { content: string; c
       inApp = false;
     }
 
-    if (inApp && /^\s+-\s*["']?\d+:\d+["']?/.test(line)) {
+    // Only rewrite the first port mapping in the app service to avoid clobbering
+    // unrelated port bindings (e.g., debug ports).
+    if (inApp && portsRewritten === 0 && /^\s+-\s*["']?\d+:\d+["']?/.test(line)) {
       const next = line.replace(/(\d+):(\d+)/, `${port}:${port}`);
-      if (next !== line) changed = true;
+      if (next !== line) { changed = true; portsRewritten++; }
       return next;
     }
 
@@ -195,7 +202,7 @@ function fixDockerignore(content: string): { content: string; fixes: string[] } 
   const fixes: string[] = [];
   const required = [".git", "node_modules", ".env", ".env.local", "__pycache__", ".next"];
   const lines = content.split("\n").map((l) => l.trim()).filter(Boolean);
-  const missing = required.filter((r) => !lines.some((l) => l === r || l.includes(r)));
+  const missing = required.filter((r) => !lines.some((l) => l === r));
 
   if (missing.length) {
     fixes.push(`.dockerignore: added ${missing.join(", ")}`);

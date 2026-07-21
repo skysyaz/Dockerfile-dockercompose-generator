@@ -76,6 +76,7 @@ interface CacheEntry {
 }
 
 const cloneCache = new Map<string, CacheEntry>();
+const cloningPromises = new Map<string, Promise<{ dir: string; analysis: AnalysisResult }>>();
 
 function cacheKey(repoUrl: string, token?: string): string {
   return `${normalizeRepoUrl(repoUrl)}::${token ?? ""}`;
@@ -179,7 +180,14 @@ export async function buildGeneratedFiles(
   if (!cloneDir) return { files: generated, auditFixes: [] };
 
   const workDir = workDirFromClone(cloneDir, effectiveAnalysis.backendSubdir);
-  const existing = await readExistingDockerFiles(workDir);
+  // Prefer backend-subdir Docker files, but also pick up root-level ones in
+  // monorepos (generated output is always written to the repo root).
+  const existingSub = await readExistingDockerFiles(workDir);
+  const existingRoot =
+    effectiveAnalysis.backendSubdir && workDir !== cloneDir
+      ? await readExistingDockerFiles(cloneDir)
+      : {};
+  const existing = { ...existingRoot, ...existingSub };
   const existingNames = Object.keys(existing);
   let files: GeneratedFiles = generated;
   const auditFixes: string[] = [];
@@ -234,6 +242,26 @@ async function hasBackendMarkers(dir: string): Promise<boolean> {
   return false;
 }
 
+async function hasNodeServerFramework(dir: string): Promise<boolean> {
+  const pkgPath = path.join(dir, "package.json");
+  try {
+    const pkg = JSON.parse(await readText(pkgPath)) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    const allDeps = { ...pkg.dependencies, ...pkg.devDependencies };
+    return !!(
+      allDeps.express ||
+      allDeps["@nestjs/core"] ||
+      allDeps.fastify ||
+      allDeps.koa ||
+      allDeps.hono
+    );
+  } catch {
+    return false;
+  }
+}
+
 async function findBackendInChildren(
   root: string,
   depth: number,
@@ -244,6 +272,10 @@ async function findBackendInChildren(
     if (!entry.isDirectory() || SKIP_DIRS.has(entry.name)) continue;
     const subPath = path.join(root, entry.name);
     if (await hasBackendMarkers(subPath)) {
+      return entry.name;
+    }
+    // Also detect Node server frameworks in subdirectory package.json
+    if (await hasNodeServerFramework(subPath)) {
       return entry.name;
     }
     const nested = await findBackendInChildren(subPath, depth + 1);
@@ -486,7 +518,9 @@ async function detectPythonManager(
     const pyproject = await readText(path.join(workDir, "pyproject.toml"));
     if (/\[tool\.poetry\]/.test(pyproject)) return "poetry";
     if (/\[tool\.pdm\]/.test(pyproject)) return "pdm";
-    if (/\[tool\.uv\]/.test(pyproject)) return "uv";
+    // Only use uv when a lockfile is present; [tool.uv] alone without uv.lock
+    // means uv is configured but dependencies haven't been locked yet.
+    if (/\[tool\.uv\]/.test(pyproject) && rootFiles.includes("uv.lock")) return "uv";
   }
   return "pip";
 }
@@ -580,6 +614,14 @@ async function detectRustBinaryName(workDir: string): Promise<string> {
   const name = bin?.[1] ?? cargo.match(/\[package\][^[]*?name\s*=\s*"([^"]+)"/)?.[1] ?? "";
   // Interpolated into a COPY instruction — only allow crate-name characters.
   return /^[A-Za-z0-9._-]+$/.test(name) ? name : "";
+}
+
+async function detectElixirAppName(workDir: string): Promise<string> {
+  const mix = await readText(path.join(workDir, "mix.exs"));
+  if (!mix) return "";
+  const match = mix.match(/app:\s*:([A-Za-z0-9_]+)/);
+  const name = match?.[1] ?? "";
+  return /^[A-Za-z0-9_]+$/.test(name) ? name : "";
 }
 
 async function refreshAnalysisRootFiles(
@@ -789,7 +831,8 @@ function detectServices(deps: string[]): DetectedService[] {
       },
       ports: ["9200:9200"],
       volumes: ["elasticsearch_data:/usr/share/elasticsearch/data"],
-      healthcheck: "curl -fs http://localhost:9200/_cluster/health || exit 1",
+      // No healthcheck: ES 8.x images do not ship curl/bash reliably.
+      // The depends_on condition will use service_started instead.
     });
   }
 
@@ -941,7 +984,9 @@ async function detectFramework(
 
   if (has("build.gradle.kts")) {
     const gradle = await read("build.gradle.kts");
-    if (/kotlin/i.test(gradle)) {
+    // Spring Boot takes precedence over plain Kotlin; handled later in the
+    // build.gradle.kts / build.gradle check that returns "spring-boot".
+    if (/kotlin/i.test(gradle) && !/spring-boot|org\.springframework/i.test(gradle)) {
       return {
         framework: "kotlin",
         language: "kotlin",
@@ -1400,6 +1445,10 @@ export async function analyzeDirectory(
       : "";
   const binaryName =
     detection.framework === "rust" ? await detectRustBinaryName(workDir) : "";
+  const elixirAppName =
+    detection.framework === "phoenix" || detection.framework === "elixir"
+      ? await detectElixirAppName(workDir)
+      : "";
 
   if (pythonManager && pythonManager !== "pip") {
     detection.notes.push(`Detected Python dependency manager: ${pythonManager}.`);
@@ -1412,6 +1461,9 @@ export async function analyzeDirectory(
   }
   if (binaryName && binaryName !== repoName) {
     detection.notes.push(`Detected binary name from Cargo.toml: ${binaryName}.`);
+  }
+  if (elixirAppName) {
+    detection.notes.push(`Detected Elixir app name from mix.exs: ${elixirAppName}.`);
   }
 
   if (backendSubdir) {
@@ -1479,6 +1531,7 @@ export async function analyzeDirectory(
     binaryName,
     nodeVersion,
     hasNodeLifecycleScripts,
+    elixirAppName,
   };
 }
 
@@ -1534,39 +1587,40 @@ function nodeGypLine(analysis: AnalysisResult, nodeImage: string): string {
     : "RUN apt-get update && apt-get install -y --no-install-recommends \\\n    python3 make g++ && rm -rf /var/lib/apt/lists/*\n";
 }
 
-function pythonDepsBlock(analysis: AnalysisResult, extraPipPackages = ""): string {
+function pythonDepsBlock(analysis: AnalysisResult, extraPipPackages = "", prefix = ""): string {
   const rootFiles = analysis.rootFiles ?? [];
   const extras = extraPipPackages
     ? `\nRUN pip install --no-cache-dir ${extraPipPackages}`
     : "";
+  const p = (f: string) => `${prefix}${f}`;
 
   switch (analysis.pythonManager ?? "pip") {
     case "poetry":
-      return `COPY pyproject.toml poetry.lock* ./
+      return `COPY ${p("pyproject.toml")} ${p("poetry.lock*")} ./
 RUN pip install --no-cache-dir poetry && \\
     poetry config virtualenvs.create false && \\
     poetry install --no-interaction --no-ansi --no-root --only main${extras}`;
     case "uv":
-      return `COPY pyproject.toml uv.lock ./
+      return `COPY ${p("pyproject.toml")} ${p("uv.lock")} ./
 RUN pip install --no-cache-dir uv && \\
     uv export --frozen --no-dev --no-emit-project -o requirements.txt && \\
     pip install --no-cache-dir -r requirements.txt${extras}`;
     case "pipenv":
-      return `COPY Pipfile Pipfile.lock* ./
+      return `COPY ${p("Pipfile")} ${p("Pipfile.lock*")} ./
 RUN pip install --no-cache-dir pipenv && \\
     pipenv install --system ${rootFiles.includes("Pipfile.lock") ? "--deploy" : "--skip-lock"}${extras}`;
     case "pdm":
-      return `COPY pyproject.toml pdm.lock* ./
+      return `COPY ${p("pyproject.toml")} ${p("pdm.lock*")} ./
 RUN pip install --no-cache-dir pdm && \\
     pdm export --prod --without-hashes -o requirements.txt && \\
     pip install --no-cache-dir -r requirements.txt${extras}`;
     default:
       if (rootFiles.length && !rootFiles.includes("requirements.txt")) {
         // pyproject-based project without a lockfile: install the package itself.
-        return `COPY . .
+        return `COPY ${prefix || "."} .
 RUN pip install --no-cache-dir .${extras}`;
       }
-      return `COPY requirements.txt .
+      return `COPY ${p("requirements.txt")} .
 RUN pip install --no-cache-dir -r requirements.txt${extraPipPackages ? ` ${extraPipPackages}` : ""}`;
   }
 }
@@ -1580,7 +1634,8 @@ const NGINX_STATIC_FIND = `RUN set -e; \\
     mkdir -p /static && cp -r "$(dirname "$OUT")"/. /static/`;
 
 function nginxServeBlock(port: number): string {
-  return `RUN printf 'server { listen ${port}; root /usr/share/nginx/html; index index.html; location / { try_files $uri $uri/ /index.html; } }' \\
+  // $$uri so Docker ENV substitution does not eat $uri before printf runs.
+  return `RUN printf 'server { listen ${port}; root /usr/share/nginx/html; index index.html; location / { try_files $$uri $$uri/ /index.html; } }' \\
     > /etc/nginx/conf.d/default.conf`;
 }
 
@@ -1611,9 +1666,42 @@ export function generateDockerfile(
   const gyp = NODE_FRAMEWORKS.has(analysis.framework)
     ? nodeGypLine(analysis, images.node)
     : "";
-  // Lifecycle scripts (postinstall etc.) reference repo files, so the
-  // manifest-only COPY would make the install fail — copy everything instead.
-  const depsCopy = analysis.hasNodeLifecycleScripts ? "COPY . ." : copyDeps;
+
+  // When the backend lives in a subdirectory, the compose build context is `.`
+  // (repo root) so .dockerignore at root is respected. COPY instructions must
+  // prefix source paths with the subdirectory. Dotnet templates already do this
+  // via dotnetContextPath, so skip them here.
+  const prefix =
+    analysis.backendSubdir && analysis.framework !== "dotnet"
+      ? `${analysis.backendSubdir.replace(/\\/g, "/")}/`
+      : "";
+
+  // Lifecycle scripts and pnpm workspaces require the full source tree before
+  // install so packages can be resolved.
+  const hasWorkspace = (analysis.rootFiles ?? []).includes("pnpm-workspace.yaml");
+  const needsFullSourceCopy = analysis.hasNodeLifecycleScripts || hasWorkspace;
+
+  // For monorepos, COPY . . must become COPY <subdir>/ ./ so only the backend
+  // is placed in the image; otherwise keep COPY . . for root-context builds.
+  const fullCopy = prefix ? `COPY ${prefix} ./` : "COPY . .";
+
+  // Prefixed dependency-manifest COPY line (no prefix when building at root).
+  // copyDeps is always a single line so no dotAll flag needed.
+  const depsCopyLine = prefix
+    ? copyDeps.replace(
+        /^(COPY\s+)([\s\S]*?)(\s+\S+)\s*$/,
+        (_, cmd, srcs, dest) =>
+          `${cmd}${srcs
+            .trim()
+            .split(/\s+/)
+            .filter(Boolean)
+            .map((s: string) => `${prefix}${s}`)
+            .join(" ")} ${dest.trim()}`,
+      )
+    : copyDeps;
+
+  // Final dep-copy line: full source for workspace/lifecycle, manifest-only otherwise.
+  const depsCopy = needsFullSourceCopy ? fullCopy : depsCopyLine;
 
   switch (analysis.framework) {
     case "nextjs":
@@ -1627,22 +1715,21 @@ ${install}
 FROM ${images.node} AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+${fullCopy}
 ${build}
 
-# Stage 3: Runner
+# Stage 3: Runner — uses \`next start\` so no output:standalone config is required
 FROM ${images.node} AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-RUN addgroup -g 1001 -S nodejs && adduser -S nextjs -u 1001
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/.next ./.next
 COPY --from=builder /app/public ./public
-COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
-COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
-USER nextjs
 EXPOSE ${customizations.port ?? analysis.port}
 ENV PORT=${customizations.port ?? analysis.port}
 ENV HOSTNAME="0.0.0.0"
-CMD ["node", "server.js"]
+CMD ["npx", "next", "start", "-H", "0.0.0.0"]
 `;
     case "django":
       return `FROM ${images.python}
@@ -1650,8 +1737,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 ${PYTHON_APT_DEPS}
-${pythonDepsBlock(analysis, "gunicorn")}
-COPY . .
+${pythonDepsBlock(analysis, "gunicorn", prefix)}
+${fullCopy}
 RUN python manage.py collectstatic --noinput || true
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["gunicorn", "--bind", "0.0.0.0:${customizations.port ?? analysis.port}", "${analysis.wsgiModule || `${repo}.wsgi:application`}"]
@@ -1662,8 +1749,8 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
 ${PYTHON_APT_DEPS}
-${pythonDepsBlock(analysis, "uvicorn")}
-COPY . .
+${pythonDepsBlock(analysis, "uvicorn", prefix)}
+${fullCopy}
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["uvicorn", "${analysis.wsgiModule || "main:app"}", "--host", "0.0.0.0", "--port", "${customizations.port ?? analysis.port}"]
 `;
@@ -1672,8 +1759,9 @@ CMD ["uvicorn", "${analysis.wsgiModule || "main:app"}", "--host", "0.0.0.0", "--
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-${pythonDepsBlock(analysis, "gunicorn")}
-COPY . .
+${PYTHON_APT_DEPS}
+${pythonDepsBlock(analysis, "gunicorn", prefix)}
+${fullCopy}
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["gunicorn", "--bind", "0.0.0.0:${customizations.port ?? analysis.port}", "${analysis.wsgiModule || "app:app"}"]
 `;
@@ -1682,20 +1770,37 @@ CMD ["gunicorn", "--bind", "0.0.0.0:${customizations.port ?? analysis.port}", "$
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 WORKDIR /app
-${pythonDepsBlock(analysis)}
-COPY . .
+${pythonDepsBlock(analysis, "", prefix)}
+${fullCopy}
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["python", "${(analysis.rootFiles ?? []).includes("main.py") ? "main.py" : "app.py"}"]
 `;
     case "spring-boot":
+      // When the project uses Maven (pom.xml detected), route to the maven template.
+      if (analysis.buildTool === "maven") {
+        return `FROM ${images.maven} AS builder
+WORKDIR /app
+COPY ${prefix}pom.xml .
+RUN mvn dependency:go-offline -B
+COPY ${prefix}src ./src
+RUN mvn package -DskipTests -B
+FROM ${images.jre}
+WORKDIR /app
+COPY --from=builder /app/target/*.jar app.jar
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["java", "-jar", "app.jar"]
+`;
+      }
+      // fall through to gradle template
     case "java-gradle":
       return `FROM ${images.gradle} AS builder
 WORKDIR /app
-COPY build.gradle* settings.gradle* ./
-COPY gradle ./gradle
-COPY gradlew gradlew.bat ./
+COPY ${prefix}build.gradle* ${prefix}settings.gradle* ./
+COPY ${prefix}gradle ./gradle
+COPY ${prefix}gradlew* ./
+RUN chmod +x gradlew 2>/dev/null || true
 RUN gradle dependencies --no-daemon || true
-COPY . .
+${fullCopy}
 ${GRADLE_BOOT_JAR_BUILD}
 FROM ${images.jre}
 WORKDIR /app
@@ -1706,9 +1811,9 @@ CMD ["java", "-jar", "app.jar"]
     case "java-maven":
       return `FROM ${images.maven} AS builder
 WORKDIR /app
-COPY pom.xml .
+COPY ${prefix}pom.xml .
 RUN mvn dependency:go-offline -B
-COPY src ./src
+COPY ${prefix}src ./src
 RUN mvn package -DskipTests -B
 FROM ${images.jre}
 WORKDIR /app
@@ -1720,9 +1825,9 @@ CMD ["java", "-jar", "app.jar"]
       return `FROM ${images.go} AS builder
 WORKDIR /app
 RUN apk add --no-cache git
-COPY go.mod go.sum* ./
+COPY ${prefix}go.mod ${prefix}go.sum* ./
 RUN go mod download
-COPY . .
+${fullCopy}
 RUN CGO_ENABLED=0 GOOS=linux go build -o app -a -ldflags '-extldflags "-static"' "${analysis.goBuildPath || "."}"
 FROM alpine:latest
 RUN apk --no-cache add ca-certificates
@@ -1734,9 +1839,9 @@ CMD ["./app"]
     case "rust":
       return `FROM ${images.rust} AS builder
 WORKDIR /app
-COPY Cargo.toml Cargo.lock* ./
+COPY ${prefix}Cargo.toml ${prefix}Cargo.lock* ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release || true
-COPY . .
+${fullCopy}
 RUN cargo build --release
 FROM debian:bookworm-slim
 WORKDIR /app
@@ -1751,9 +1856,9 @@ CMD ["./app"]
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     build-essential libpq-dev nodejs && rm -rf /var/lib/apt/lists/*
-COPY Gemfile Gemfile.lock* ./
+COPY ${prefix}Gemfile ${prefix}Gemfile.lock* ./
 RUN bundle install
-COPY . .
+${fullCopy}
 RUN bundle exec rake assets:precompile || true
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["bundle", "exec", "rails", "server", "-b", "0.0.0.0", "-p", "${customizations.port ?? analysis.port}"]
@@ -1765,9 +1870,9 @@ RUN apk add --no-cache \\
     postgresql-dev libpng-dev libzip-dev zip unzip \\
     && docker-php-ext-install pdo pdo_pgsql gd zip
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
-COPY composer.json composer.lock* ./
+COPY ${prefix}composer.json ${prefix}composer.lock* ./
 RUN composer install --no-dev --optimize-autoloader --no-scripts
-COPY . .
+${fullCopy}
 RUN chown -R www-data:www-data /var/www
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["php", "artisan", "serve", "--host=0.0.0.0", "--port=${customizations.port ?? analysis.port}"]
@@ -1795,8 +1900,31 @@ EXPOSE ${customizations.port ?? analysis.port}
 ENTRYPOINT ["dotnet", "${dllName}.dll"]
 `;
     }
-    case "express":
     case "nestjs":
+      return `# Stage 1: Dependencies
+FROM ${images.node} AS deps
+WORKDIR /app
+${gyp}${depsCopy}
+${install}
+
+# Stage 2: Build
+FROM ${images.node} AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+${fullCopy}
+${build}
+
+# Stage 3: Runner
+FROM ${images.node} AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/package*.json ./
+EXPOSE ${customizations.port ?? analysis.port}
+CMD ["node", "dist/main"]
+`;
+    case "express":
     case "nodejs":
     case "fastify":
     case "koa":
@@ -1810,7 +1938,7 @@ FROM ${images.node} AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+${fullCopy}
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["npm", "start"]
 `;
@@ -1825,7 +1953,7 @@ FROM ${images.node} AS builder
 WORKDIR /app
 ${gyp}${depsCopy}
 ${install}
-COPY . .
+${fullCopy}
 ${build}
 ${NGINX_STATIC_FIND}
 
@@ -1850,7 +1978,7 @@ ${install}
 FROM ${images.node} AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+${fullCopy}
 ${build}
 
 # Stage 3: Runner
@@ -1871,7 +1999,7 @@ FROM ${images.node} AS builder
 WORKDIR /app
 ${gyp}${depsCopy}
 ${install}
-COPY . .
+${fullCopy}
 ${build}
 ${NGINX_STATIC_FIND}
 
@@ -1888,7 +2016,7 @@ CMD ["nginx", "-g", "daemon off;"]
 WORKDIR /app
 ${gyp}${depsCopy}
 ${install}
-COPY . .
+${fullCopy}
 ${build}
 
 FROM ${images.node} AS runner
@@ -1910,9 +2038,9 @@ CMD ["npm", "run", "start"]
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     build-essential libpq-dev && rm -rf /var/lib/apt/lists/*
-COPY Gemfile Gemfile.lock* ./
+COPY ${prefix}Gemfile ${prefix}Gemfile.lock* ./
 RUN bundle install
-COPY . .
+${fullCopy}
 EXPOSE ${port}
 ${cmd}
 `;
@@ -1931,9 +2059,9 @@ RUN apk add --no-cache \\
     postgresql-dev libpng-dev libzip-dev zip unzip \\
     && docker-php-ext-install pdo pdo_pgsql zip
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
-COPY composer.json composer.lock* ./
+COPY ${prefix}composer.json ${prefix}composer.lock* ./
 RUN composer install --no-dev --optimize-autoloader --no-scripts --no-interaction
-COPY . .
+${fullCopy}
 EXPOSE ${port}
 CMD ["php", "-S", "0.0.0.0:${port}", "-t", "${docRoot}"]
 `;
@@ -1941,9 +2069,9 @@ CMD ["php", "-S", "0.0.0.0:${port}", "-t", "${docRoot}"]
     case "dart":
       return `FROM dart:stable AS builder
 WORKDIR /app
-COPY pubspec.* ./
+COPY ${prefix}pubspec.* ./
 RUN dart pub get
-COPY . .
+${fullCopy}
 RUN set -e; \\
     TARGET=$(ls bin/*.dart 2>/dev/null | head -1); \\
     test -n "$TARGET" || { echo "No entry script found in bin/" >&2; exit 1; }; \\
@@ -1962,9 +2090,9 @@ CMD ["./server"]
       if ((analysis.rootFiles ?? []).includes("project.clj")) {
         return `FROM clojure:temurin-17-lein AS builder
 WORKDIR /app
-COPY project.clj ./
+COPY ${prefix}project.clj ./
 RUN lein deps
-COPY . .
+${fullCopy}
 RUN lein uberjar
 
 FROM eclipse-temurin:17-jre-alpine
@@ -1976,9 +2104,9 @@ CMD ["java", "-jar", "app.jar"]
       }
       return `FROM clojure:temurin-17-tools-deps
 WORKDIR /app
-COPY deps.edn ./
+COPY ${prefix}deps.edn ./
 RUN clojure -P
-COPY . .
+${fullCopy}
 EXPOSE ${port}
 # Adjust -m to your main namespace if it differs.
 CMD ["clojure", "-M", "-m", "${repo}.core"]
@@ -1989,7 +2117,7 @@ CMD ["clojure", "-M", "-m", "${repo}.core"]
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \\
     cmake ninja-build && rm -rf /var/lib/apt/lists/*
-COPY . .
+${fullCopy}
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 RUN set -e; \\
     BIN=$(find build -maxdepth 3 -type f -perm -u+x ! -name '*.so*' ! -name '*.a' ! -name 'CMake*' ! -name '*.cmake' | head -1); \\
@@ -2024,16 +2152,14 @@ ${install}
 FROM ${images.node} AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+${fullCopy}
 ${build}
 
 # Stage 3: Runner
 FROM ${images.node} AS runner
 WORKDIR /app
 ENV NODE_ENV=production
-RUN addgroup -g 1001 -S nodejs && adduser -S nuxtjs -u 1001
 COPY --from=builder /app/.output ./.output
-USER nuxtjs
 EXPOSE ${customizations.port ?? analysis.port}
 ENV PORT=${customizations.port ?? analysis.port}
 ENV HOST=0.0.0.0
@@ -2044,7 +2170,7 @@ CMD ["node", ".output/server/index.mjs"]
 WORKDIR /app
 ${gyp}${depsCopy}
 ${install}
-COPY . .
+${fullCopy}
 ${build}
 
 FROM ${images.node} AS runner
@@ -2057,14 +2183,18 @@ EXPOSE ${customizations.port ?? analysis.port}
 CMD ["npm", "start"]
 `;
     case "phoenix":
-    case "elixir":
+    case "elixir": {
+      const elixirBin = analysis.elixirAppName || "";
+      const elixirCmd = elixirBin
+        ? `CMD ["bin/${elixirBin}", "start"]`
+        : `CMD ["sh", "-c", "exec bin/$(ls bin/ | head -1) start"]`;
       return `FROM elixir:1.16-alpine AS builder
 WORKDIR /app
 RUN apk add --no-cache build-base git
-COPY mix.exs mix.lock* ./
+COPY ${prefix}mix.exs ${prefix}mix.lock* ./
 RUN mix local.hex --force && mix local.rebar --force
 RUN mix deps.get --only prod
-COPY . .
+${fullCopy}
 RUN MIX_ENV=prod mix compile && mix release
 
 FROM alpine:latest
@@ -2073,31 +2203,33 @@ RUN apk add --no-cache openssl ncurses-libs libstdc++
 COPY --from=builder /app/_build/prod/rel/*/ ./
 EXPOSE ${customizations.port ?? analysis.port}
 ENV PORT=${customizations.port ?? analysis.port}
-CMD ["bin/server", "start"]
+${elixirCmd}
 `;
+    }
     case "scala":
       return `FROM eclipse-temurin:17-jdk-alpine AS builder
 WORKDIR /app
-COPY build.sbt ./
-COPY project ./project
+COPY ${prefix}build.sbt ./
+COPY ${prefix}project ./project
 RUN sbt update
-COPY . .
+${fullCopy}
 RUN sbt stage
 
 FROM eclipse-temurin:17-jre-alpine
 WORKDIR /app
 COPY --from=builder /app/target/universal/stage ./
 EXPOSE ${customizations.port ?? analysis.port}
-CMD ["bin/main"]
+CMD ["sh", "-c", "exec $(find bin -maxdepth 1 -type f | head -1)"]
 `;
     case "kotlin":
       return `FROM ${images.gradle} AS builder
 WORKDIR /app
-COPY build.gradle.kts settings.gradle.kts gradle.properties* ./
-COPY gradle ./gradle
-COPY gradlew gradlew.bat ./
+COPY ${prefix}build.gradle.kts ${prefix}settings.gradle.kts ${prefix}gradle.properties* ./
+COPY ${prefix}gradle ./gradle
+COPY ${prefix}gradlew* ./
+RUN chmod +x gradlew 2>/dev/null || true
 RUN gradle dependencies --no-daemon || true
-COPY . .
+${fullCopy}
 ${GRADLE_BOOT_JAR_BUILD}
 
 FROM ${images.jre}
@@ -2109,8 +2241,8 @@ CMD ["java", "-jar", "app.jar"]
     case "deno":
       return `FROM denoland/deno:alpine
 WORKDIR /app
-COPY deno.json deno.jsonc* ./
-COPY . .
+COPY ${prefix}deno.json ${prefix}deno.jsonc* ./
+${fullCopy}
 RUN deno cache main.ts || true
 EXPOSE ${customizations.port ?? analysis.port}
 CMD ["deno", "run", "--allow-net", "--allow-read", "main.ts"]
@@ -2118,29 +2250,29 @@ CMD ["deno", "run", "--allow-net", "--allow-read", "main.ts"]
     case "swift":
       return `FROM swift:5.10-jammy AS builder
 WORKDIR /app
-COPY Package.swift Package.resolved* ./
-COPY Sources ./Sources
+COPY ${prefix}Package.swift ${prefix}Package.resolved* ./
+COPY ${prefix}Sources ./Sources
 RUN swift build -c release
 
 FROM ubuntu:22.04
 WORKDIR /app
-COPY --from=builder /app/.build/release/* /app/server
+COPY --from=builder /app/.build/release/ /app/
 EXPOSE ${customizations.port ?? analysis.port}
-CMD ["./server"]
+CMD ["sh", "-c", "exec $(find /app -maxdepth 1 -type f -perm -u+x | head -1)"]
 `;
     case "haskell":
       return `FROM haskell:9.6 AS builder
 WORKDIR /app
-COPY stack.yaml package.yaml ./
+COPY ${prefix}stack.yaml ${prefix}package.yaml ./
 RUN stack update && stack build --dependencies-only || true
-COPY . .
+${fullCopy}
 RUN stack install --local-bin-path /app/bin
 
 FROM debian:bookworm-slim
 WORKDIR /app
-COPY --from=builder /app/bin/* /app/server
+COPY --from=builder /app/bin/ /app/
 EXPOSE ${customizations.port ?? analysis.port}
-CMD ["./server"]
+CMD ["sh", "-c", "exec $(find /app -maxdepth 1 -type f -perm -u+x | head -1)"]
 `;
     default:
       return `FROM alpine:latest
@@ -2199,18 +2331,11 @@ export function generateDockerCompose(
   );
   const repo = analysis.repoName;
 
-  // For monorepos the Dockerfile's COPY paths are relative to the backend
-  // subdirectory, so the build context must point there. The Dockerfile itself
-  // lives at the repo root (where generated files are written), which compose
-  // supports via a context-escaping dockerfile path. .NET templates are the
-  // exception: they COPY the whole repo and prefix paths with the subdir.
-  const backendContext =
-    analysis.framework !== "dotnet"
-      ? (analysis.backendSubdir || "").replace(/\\/g, "/")
-      : "";
-  const buildBlock = backendContext
-    ? `    build:\n      context: ./${backendContext}\n      dockerfile: ${"../".repeat(backendContext.split("/").length)}Dockerfile\n`
-    : `    build: .\n`;
+  // Always use the repo root as the build context so that .dockerignore at root
+  // is respected. Non-dotnet Dockerfiles prefix all COPY source paths with the
+  // backend subdirectory when backendSubdir is set, so they only pull in the
+  // relevant source tree even when the context is ".".
+  const buildBlock = `    build: .\n`;
 
   let yaml = `services:\n  app:\n${buildBlock}    container_name: ${repo}-app\n    ports:\n      - "${port}:${port}"\n    restart: unless-stopped\n`;
 
@@ -2311,7 +2436,6 @@ LICENSE
 
   if (analysis.framework === "rust") {
     return `${common}target
-Cargo.lock
 `;
   }
   if (analysis.language === "java") {
@@ -2393,22 +2517,39 @@ export async function cloneAndAnalyze(
     return { dir: cached.dir, analysis: cached.analysis };
   }
 
-  const os = await import("os");
-  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-"));
-  try {
-    await cloneRepo(repoUrl, tempDir, githubToken);
-    const analysis = await analyzeDirectory(repoUrl, tempDir);
-    evictOldestCacheEntry();
-    cloneCache.set(key, {
-      dir: tempDir,
-      analysis,
-      expiresAt: Date.now() + CACHE_TTL_MS,
-    });
-    return { dir: tempDir, analysis };
-  } catch (error) {
-    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-    throw error;
-  }
+  // If another concurrent request is already cloning this repo, wait for it.
+  const inflight = cloningPromises.get(key);
+  if (inflight) return inflight;
+
+  const promise = (async () => {
+    // Re-check cache in case it was populated while we were awaiting.
+    const rechecked = cloneCache.get(key);
+    if (rechecked && rechecked.expiresAt > Date.now()) {
+      return { dir: rechecked.dir, analysis: rechecked.analysis };
+    }
+
+    const os = await import("os");
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "dockgen-"));
+    try {
+      await cloneRepo(repoUrl, tempDir, githubToken);
+      const analysis = await analyzeDirectory(repoUrl, tempDir);
+      evictOldestCacheEntry();
+      cloneCache.set(key, {
+        dir: tempDir,
+        analysis,
+        expiresAt: Date.now() + CACHE_TTL_MS,
+      });
+      return { dir: tempDir, analysis };
+    } catch (error) {
+      await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+      throw error;
+    } finally {
+      cloningPromises.delete(key);
+    }
+  })();
+
+  cloningPromises.set(key, promise);
+  return promise;
 }
 
 export function getCachedAnalysis(

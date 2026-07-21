@@ -88,9 +88,13 @@ export function installCmd(pm: string, rootFiles: string[] = []): string {
         ? "RUN npm i -g pnpm && pnpm install --frozen-lockfile"
         : "RUN npm i -g pnpm && pnpm install";
     case "yarn":
-      return rootFiles.includes("yarn.lock")
-        ? "RUN yarn install --frozen-lockfile"
-        : "RUN yarn install";
+      if (rootFiles.includes("yarn.lock")) {
+        // Yarn Berry (.yarnrc.yml present) uses --immutable; Classic uses --frozen-lockfile
+        return rootFiles.includes(".yarnrc.yml")
+          ? "RUN yarn install --immutable"
+          : "RUN yarn install --frozen-lockfile";
+      }
+      return "RUN yarn install";
     case "bun":
       return rootFiles.some((file) => file === "bun.lock" || file === "bun.lockb")
         ? "RUN npm i -g bun && bun install --frozen-lockfile"

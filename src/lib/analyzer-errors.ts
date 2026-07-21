@@ -1,5 +1,7 @@
 export function redactSecrets(message: string): string {
-  return message.replace(/(https?:\/\/)[^@]+@/g, "$1");
+  return message
+    .replace(/(https?:\/\/)[^@]+@/g, "$1")
+    .replace(/\b(ghp_|github_pat_|glpat-)[A-Za-z0-9_-]+/g, "$1[REDACTED]");
 }
 
 export function classifyCloneError(
